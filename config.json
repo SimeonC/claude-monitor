@@ -1,0 +1,27 @@
+{
+  "announce" : {
+    "enabled" : false,
+    "on_attention" : true,
+    "on_done" : true,
+    "on_start" : false,
+    "volume" : 0.5
+  },
+  "elevenlabs" : {
+    "env_file" : "~\/Projects\/Claude\/projects\/life-copilot\/.env",
+    "model" : "eleven_multilingual_v2",
+    "similarity_boost" : 0.75,
+    "stability" : 0.5,
+    "voice_id" : "D3R2bb2JNcN2aFfwe3S0"
+  },
+  "say" : {
+    "rate" : 200,
+    "voice" : "Samantha"
+  },
+  "tts_provider" : "elevenlabs",
+  "voices" : [
+    {
+      "id" : "D3R2bb2JNcN2aFfwe3S0",
+      "name" : "human robot"
+    }
+  ]
+}
