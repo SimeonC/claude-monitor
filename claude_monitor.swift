@@ -127,7 +127,7 @@ class VoiceFetcher: ObservableObject {
 
         let body: [String: Any] = [
             "voice_description": prompt,
-            "text": "Hello, a session just finished. Your project is done and ready for review.",
+            "text": "Hello. A session just finished — your project is done and ready for review. Another session needs your attention, it looks like there is a permission prompt waiting. Everything else is still running smoothly.",
             "model_id": "eleven_multilingual_ttv_v2",
             "guidance_scale": 5,
             "quality": 0.9
