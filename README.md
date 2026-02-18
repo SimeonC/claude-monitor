@@ -43,8 +43,7 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - Works immediately with macOS built-in voices (zero setup)
 - Optional [ElevenLabs](https://elevenlabs.io) support for premium AI voices
 - Built-in voice picker — browse your ElevenLabs library or paste any voice ID
-- Per-event toggles: done, attention, start (off by default)
-- Configurable volume from the settings popover
+- Per-event toggles and volume in `config.json`
 
 **See everything**
 - Live status for every session: starting, working, done, or needs attention
