@@ -4,7 +4,7 @@
 
 **A floating macOS dashboard for all your Claude Code sessions.**
 
-Know what's working, what's done, and what needs you — at a glance.
+See what's working, what's done, and what needs you — at a glance. Hear it too — voice announces when sessions finish or need permission.
 
 <br>
 
