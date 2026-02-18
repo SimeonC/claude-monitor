@@ -42,6 +42,7 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - Speaks when sessions finish or need permission — no more tab-switching to check
 - Works immediately with macOS built-in voices (zero setup)
 - Optional [ElevenLabs](https://elevenlabs.io) support for premium AI voices
+- One-click voice generation — designs a custom AI voice from an included prompt and saves it to your account
 - Built-in voice picker — browse your ElevenLabs library or paste any voice ID
 - Per-event toggles and volume in `config.json`
 
@@ -215,15 +216,15 @@ For the highest quality, you can use [ElevenLabs](https://elevenlabs.io) AI voic
    {
      "tts_provider": "elevenlabs",
      "elevenlabs": {
-       "env_file": "~/path/to/your/.env",
-       "voice_id": "D3R2bb2JNcN2aFfwe3S0"
+       "env_file": "~/.env"
      }
    }
    ```
+4. Open the settings popover (gear icon) and click **Generate voice** — this designs a custom AI voice from the included prompt and saves it to your ElevenLabs account. One click, done.
 
-The built-in voice picker (gear icon → voice list) lets you browse and select from your ElevenLabs voice library. You can also paste any voice ID from your clipboard — the app resolves the name automatically and saves it to your list.
+You can also browse your existing ElevenLabs voice library from the voice picker, or paste any voice ID from your clipboard — the app resolves the name automatically and saves it to your list.
 
-Ships with the **"human robot"** ElevenLabs voice built in.
+The included voice design prompt creates a warm, softly synthetic voice — like a machine that genuinely cares. You can customize it in `config.json` under `elevenlabs.voice_design_prompt`.
 
 ### Volume and toggles
 
@@ -285,10 +286,11 @@ Full config reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
   "tts_provider": "say",
   "elevenlabs": {
     "env_file": "~/.env",
-    "voice_id": "D3R2bb2JNcN2aFfwe3S0",
     "model": "eleven_multilingual_v2",
     "stability": 0.5,
-    "similarity_boost": 0.75
+    "similarity_boost": 0.75,
+    "voice_design_prompt": "Soft, androgynous male voice with a clear synthetic quality...",
+    "voice_design_name": "claude-monitor"
   },
   "say": { "voice": "Zoe (Premium)", "rate": 200 },
   "announce": {
@@ -298,9 +300,7 @@ Full config reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
     "on_start": false,
     "volume": 0.5
   },
-  "voices": [
-    { "id": "D3R2bb2JNcN2aFfwe3S0", "name": "human robot" }
-  ]
+  "voices": []
 }
 ```
 

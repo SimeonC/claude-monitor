@@ -16,6 +16,8 @@ struct MonitorConfig: Codable {
         var model: String
         var stability: Double
         var similarity_boost: Double
+        var voice_design_prompt: String?
+        var voice_design_name: String?
     }
     struct SayConfig: Codable {
         var voice: String
@@ -109,6 +111,70 @@ class VoiceFetcher: ObservableObject {
                 return
             }
             completion(name)
+        }.resume()
+    }
+
+    /// Design a voice from a text prompt, save it, and return the voice_id + name
+    func designVoice(prompt: String, name: String, completion: @escaping (String?, String?) -> Void) {
+        guard let apiKey = apiKey, !apiKey.isEmpty else { completion(nil, nil); return }
+        guard let designURL = URL(string: "https://api.elevenlabs.io/v1/text-to-voice/design") else { completion(nil, nil); return }
+
+        // Step 1: Generate preview
+        var request = URLRequest(url: designURL)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = [
+            "voice_description": prompt,
+            "text": "Hello, a session just finished. Your project is done and ready for review.",
+            "model_id": "eleven_multilingual_ttv_v2",
+            "guidance_scale": 5,
+            "quality": 0.9
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let previews = json["previews"] as? [[String: Any]],
+                  let first = previews.first,
+                  let generatedId = first["generated_voice_id"] as? String else {
+                completion(nil, nil)
+                return
+            }
+
+            // Step 2: Save as permanent voice
+            self?.saveDesignedVoice(generatedId: generatedId, name: name, prompt: prompt, completion: completion)
+        }.resume()
+    }
+
+    private func saveDesignedVoice(generatedId: String, name: String, prompt: String, completion: @escaping (String?, String?) -> Void) {
+        guard let apiKey = apiKey, !apiKey.isEmpty else { completion(nil, nil); return }
+        guard let url = URL(string: "https://api.elevenlabs.io/v1/text-to-voice") else { completion(nil, nil); return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any] = [
+            "voice_name": name,
+            "voice_description": prompt,
+            "generated_voice_id": generatedId,
+            "labels": ["source": "claude-monitor"]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let voiceId = json["voice_id"] as? String else {
+                completion(nil, nil)
+                return
+            }
+            let voiceName = json["name"] as? String ?? name
+            completion(voiceId, voiceName)
         }.resume()
     }
 }
@@ -648,6 +714,8 @@ struct SettingsPopover: View {
     var sessionReader: SessionReader?
     @State private var pastedVoiceId: String? = nil
     @State private var refreshed = false
+    @State private var isGenerating = false
+    @State private var generateResult: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -777,6 +845,55 @@ struct SettingsPopover: View {
                     Text("Set to \(pasted)...")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundColor(.green.opacity(0.6))
+                }
+
+                // Generate voice from design prompt
+                if let prompt = configManager.config?.elevenlabs.voice_design_prompt, !prompt.isEmpty {
+                    Divider().background(Color.white.opacity(0.1))
+
+                    Button {
+                        guard !isGenerating else { return }
+                        isGenerating = true
+                        generateResult = nil
+                        let voiceName = configManager.config?.elevenlabs.voice_design_name ?? "claude-monitor"
+                        voiceFetcher.designVoice(prompt: prompt, name: voiceName) { voiceId, name in
+                            DispatchQueue.main.async {
+                                isGenerating = false
+                                if let voiceId = voiceId, let name = name {
+                                    configManager.setVoice(voiceId)
+                                    configManager.addVoice(id: voiceId, name: name)
+                                    generateResult = name
+                                    voiceFetcher.fetchVoices()
+                                } else {
+                                    generateResult = "failed"
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isGenerating {
+                                ProgressView()
+                                    .scaleEffect(0.5)
+                                    .frame(width: 10, height: 10)
+                            } else {
+                                Image(systemName: "wand.and.stars")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.purple.opacity(0.6))
+                            }
+                            Text(isGenerating ? "Generating..." : "Generate voice")
+                                .font(.system(size: 10))
+                                .foregroundColor(isGenerating ? .purple.opacity(0.4) : .purple.opacity(0.6))
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isGenerating)
+
+                    if let result = generateResult {
+                        Text(result == "failed" ? "Generation failed" : "Created \"\(result)\"")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(result == "failed" ? .red.opacity(0.6) : .green.opacity(0.6))
+                    }
                 }
             }
         }

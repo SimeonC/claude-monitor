@@ -8,11 +8,12 @@ All configuration lives in `~/.claude/monitor/config.json`. Changes are picked u
 {
   "tts_provider": "say",
   "elevenlabs": {
-    "env_file": "~/path/to/.env",
-    "voice_id": "D3R2bb2JNcN2aFfwe3S0",
+    "env_file": "~/.env",
     "model": "eleven_multilingual_v2",
     "stability": 0.5,
-    "similarity_boost": 0.75
+    "similarity_boost": 0.75,
+    "voice_design_prompt": "Soft, androgynous male voice with a clear synthetic quality...",
+    "voice_design_name": "claude-monitor"
   },
   "say": {
     "voice": "Zoe (Premium)",
@@ -25,9 +26,7 @@ All configuration lives in `~/.claude/monitor/config.json`. Changes are picked u
     "on_start": false,
     "volume": 0.5
   },
-  "voices": [
-    { "id": "D3R2bb2JNcN2aFfwe3S0", "name": "human robot" }
-  ]
+  "voices": []
 }
 ```
 
@@ -49,10 +48,12 @@ ElevenLabs configuration. Only used when `tts_provider` is `"elevenlabs"`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `env_file` | string | — | Path to `.env` file containing `ELEVENLABS_API_KEY` (supports `~`) |
-| `voice_id` | string | — | ElevenLabs voice ID to use. Overrides any `ELEVENLABS_VOICE_ID` in the env file |
+| `voice_id` | string | — | ElevenLabs voice ID to use for TTS. Set automatically when you generate or select a voice |
 | `model` | string | `"eleven_multilingual_v2"` | ElevenLabs model ID |
 | `stability` | number | `0.5` | Voice stability (0.0–1.0) |
 | `similarity_boost` | number | `0.75` | Voice similarity boost (0.0–1.0) |
+| `voice_design_prompt` | string | *(included)* | Text prompt describing the voice to generate. Used by the "Generate voice" button in settings |
+| `voice_design_name` | string | `"claude-monitor"` | Name for the generated voice in your ElevenLabs account |
 
 ### `say`
 
@@ -77,13 +78,12 @@ Controls when and how voice announcements are made.
 
 ### `voices`
 
-Array of saved voices that appear in the settings voice picker. Voices are added here automatically when you paste a voice ID from the clipboard.
+Array of saved voices that appear in the settings voice picker. Voices are added here automatically when you generate a voice, paste a voice ID, or select from your library.
 
 ```json
 {
   "voices": [
-    { "id": "D3R2bb2JNcN2aFfwe3S0", "name": "human robot" },
-    { "id": "another-voice-id", "name": "my custom voice" }
+    { "id": "some-voice-id", "name": "my custom voice" }
   ]
 }
 ```
@@ -103,6 +103,7 @@ Point to it with `elevenlabs.env_file` in config.json. The path supports `~` for
 
 The API key is used for:
 - Voice announcements (text-to-speech)
+- Generating a custom voice from the design prompt
 - Fetching your voice library (for the voice picker in settings)
 - Resolving voice names when pasting a voice ID
 
@@ -110,9 +111,10 @@ The API key is used for:
 
 Click the gear icon in the panel header to access settings at runtime:
 
+- **Refresh sessions** — scans for running Claude processes and creates session files for any that aren't tracked
 - **Voice on/off** — toggles `announce.enabled`
 - **Voice picker** — select from saved + library voices
 - **Paste voice ID** — reads your clipboard, resolves the voice name via API, saves it to the `voices` array
-- **Refresh sessions** — scans for running Claude processes and creates session files for any that aren't tracked
+- **Generate voice** — designs a custom AI voice from `voice_design_prompt`, saves it to your ElevenLabs account, and sets it as the active voice. Only appears when a design prompt is configured.
 
 Changes made through the popover are persisted to `config.json` immediately.
