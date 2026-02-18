@@ -13,17 +13,15 @@ Know what's working, what's done, and what needs you — at a glance.
 <br>
 <br>
 
-<sub>Dark glass panel &nbsp;·&nbsp; Voice announcements &nbsp;·&nbsp; Click to jump to any session &nbsp;·&nbsp; Auto-cleanup</sub>
-
-<br>
-
 </div>
 
 ---
 
 If you run multiple Claude Code sessions at once, you know the pain: switching tabs to check which one finished, which one is waiting for permission, which one is still thinking. Claude Monitor fixes that.
 
-A tiny floating panel sits in the corner of your screen, always visible. It shows every active Claude Code session with its status, project name, and last prompt. Click a row to jump straight to that terminal tab. When something finishes or needs attention, it tells you — out loud.
+A tiny floating panel sits in the corner of your screen, always visible. It shows every active Claude Code session with its status, project name, and last prompt. Click a row to jump straight to that terminal tab.
+
+**And it talks to you.** When a session finishes — *"life-copilot done."* When one needs permission — *"splat-lab needs attention."* Works out of the box with your Mac's built-in voices. Plug in an [ElevenLabs](https://elevenlabs.io) API key for AI voices, or browse and switch voices from the built-in picker.
 
 <div align="center">
 <table>
@@ -40,6 +38,14 @@ A tiny floating panel sits in the corner of your screen, always visible. It show
 
 ## Features
 
+**Voice announcements**
+- Speaks when sessions finish or need permission — no more tab-switching to check
+- Works immediately with macOS built-in voices (zero setup)
+- Optional [ElevenLabs](https://elevenlabs.io) support for premium AI voices
+- Built-in voice picker — browse your ElevenLabs library or paste any voice ID
+- Per-event toggles: done, attention, start (off by default)
+- Configurable volume from the settings popover
+
 **See everything**
 - Live status for every session: starting, working, done, or needs attention
 - Project name, elapsed time, and last prompt preview
@@ -48,14 +54,8 @@ A tiny floating panel sits in the corner of your screen, always visible. It show
 
 **Stay in flow**
 - Click any row to jump to that terminal tab instantly (Terminal.app + iTerm2)
-- Voice announces when sessions finish or need permission — uses your Mac's built-in voices out of the box
-- Optional [ElevenLabs](https://elevenlabs.io) support for premium AI voices with a built-in voice picker
-- Configurable volume and per-event toggles
-
-**Keep it clean**
 - Kill any session with one click (hover to reveal the X)
 - Dead sessions auto-removed when the terminal tab closes
-- Sessions disappear 5 seconds after you exit Claude Code
 - Discover missing sessions with the refresh button
 
 **Designed to disappear**
@@ -341,6 +341,10 @@ Then remove the 5 hook entries (`SessionStart`, `UserPromptSubmit`, `Stop`, `Not
 │   └── monitor.sh            # Hook script — lifecycle events + TTS
 └── settings.json              # Claude Code settings (hooks go here)
 ```
+
+## License
+
+[MIT](LICENSE)
 
 ---
 
