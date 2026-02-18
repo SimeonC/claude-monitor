@@ -19,7 +19,7 @@ See what's working, what's done, and what needs you — at a glance. Hear it too
 
 If you run multiple Claude Code sessions at once, you know the pain: switching tabs to check which one finished, which one is waiting for permission, which one is still thinking. Claude Monitor fixes that.
 
-A tiny floating panel sits in the corner of your screen, always visible. It shows every active Claude Code session with its status, project name, and last prompt. Click a row to jump straight to that terminal tab.
+A tiny always-on-top panel you can drag anywhere on your screen. It shows every active Claude Code session with its status, project name, and last prompt. Click a row to jump straight to that terminal tab.
 
 **And it talks to you.** When a session finishes — *"my-project done."* When one needs permission — *"backend needs attention."* Works out of the box with your Mac's built-in voices. Plug in an [ElevenLabs](https://elevenlabs.io) API key for AI voices, or browse and switch voices from the built-in picker.
 
