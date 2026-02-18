@@ -92,10 +92,11 @@ The voice picker shows these saved voices **plus** any voices from your ElevenLa
 
 ## ElevenLabs `.env` File
 
-Create a `.env` file anywhere on your system:
+Copy the included [`.env.example`](../.env.example) and add your key:
 
-```
-ELEVENLABS_API_KEY=sk_your_api_key_here
+```bash
+cp .env.example ~/.env
+# edit ~/.env and paste your API key
 ```
 
 Point to it with `elevenlabs.env_file` in config.json. The path supports `~` for home directory.

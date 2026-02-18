@@ -205,9 +205,10 @@ Run `say -v '?'` in Terminal to list all installed voices and their exact names.
 For the highest quality, you can use [ElevenLabs](https://elevenlabs.io) AI voices instead:
 
 1. Get an API key at [elevenlabs.io](https://elevenlabs.io)
-2. Create a `.env` file anywhere:
-   ```
-   ELEVENLABS_API_KEY=sk_your_key_here
+2. Copy the included example and add your key:
+   ```bash
+   cp .env.example ~/.env
+   # edit ~/.env and paste your API key
    ```
 3. Update `config.json`:
    ```json
