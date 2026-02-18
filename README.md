@@ -21,7 +21,7 @@ If you run multiple Claude Code sessions at once, you know the pain: switching t
 
 A tiny floating panel sits in the corner of your screen, always visible. It shows every active Claude Code session with its status, project name, and last prompt. Click a row to jump straight to that terminal tab.
 
-**And it talks to you.** When a session finishes — *"life-copilot done."* When one needs permission — *"splat-lab needs attention."* Works out of the box with your Mac's built-in voices. Plug in an [ElevenLabs](https://elevenlabs.io) API key for AI voices, or browse and switch voices from the built-in picker.
+**And it talks to you.** When a session finishes — *"my-project done."* When one needs permission — *"backend needs attention."* Works out of the box with your Mac's built-in voices. Plug in an [ElevenLabs](https://elevenlabs.io) API key for AI voices, or browse and switch voices from the built-in picker.
 
 <div align="center">
 <table>
