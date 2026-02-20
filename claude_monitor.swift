@@ -350,6 +350,7 @@ class SessionReader: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     private var timer: Timer?
     private var livenessTimer: Timer?
+    private var dirSource: DispatchSourceFileSystemObject?
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -358,7 +359,25 @@ class SessionReader: ObservableObject {
 
     init() {
         readSessions()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+
+        // FSEvents: instant reload when session files change
+        let fd = open(sessionsDir, O_EVTONLY)
+        if fd >= 0 {
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .delete, .rename, .extend],
+                queue: .main
+            )
+            source.setEventHandler { [weak self] in
+                self?.readSessions()
+            }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            dirSource = source
+        }
+
+        // Fallback poll (catches edge cases FSEvents might miss)
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.readSessions()
         }
         livenessTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
