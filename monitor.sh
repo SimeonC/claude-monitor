@@ -1,7 +1,7 @@
 #!/bin/bash
 # ~/.claude/hooks/monitor.sh
 # Claude Code lifecycle hook — writes session JSON + triggers TTS
-# Called by hook events: SessionStart, UserPromptSubmit, Stop, Notification, SessionEnd
+# Called by hook events: SessionStart, UserPromptSubmit, Stop, PreToolUse, PostToolUse, Notification, SessionEnd
 #
 # Usage: monitor.sh [event]
 # Receives hook JSON on stdin (event auto-detected from hook_event_name if arg omitted)
@@ -240,18 +240,35 @@ case "$EVENT" in
         fi
         ;;
 
+    PreToolUse|PostToolUse)
+        # Claude is actively working — PreToolUse fires earliest, PostToolUse
+        # catches the resume after a permission prompt is accepted
+        if [ -f "$SESSION_FILE" ]; then
+            update_session "working"
+        fi
+        ;;
+
     Notification)
         NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
+        # idle_prompt means Claude is waiting for input — that's "done", not "attention"
+        if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
+            if [ -f "$SESSION_FILE" ]; then
+                update_session "done"
+            else
+                create_session "done"
+            fi
+            if should_announce done; then
+                announce "$PROJECT_NAME done" &
+            fi
+            exit 0
+        fi
         if [ -f "$SESSION_FILE" ]; then
             update_session "attention"
         else
             create_session "attention"
         fi
         if should_announce attention; then
-            case "$NOTIF_TYPE" in
-                idle_prompt)   announce "$PROJECT_NAME is idle" & ;;
-                *)             announce "$PROJECT_NAME needs attention" & ;;
-            esac
+            announce "$PROJECT_NAME needs attention" &
         fi
         ;;
 

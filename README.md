@@ -114,73 +114,24 @@ chmod +x ~/.claude/monitor/build.sh ~/.claude/hooks/monitor.sh
 
 #### 4. Configure hooks
 
-Add the following to your `~/.claude/settings.json`. If you already have a `"hooks"` section, **merge** these entries in — don't replace your existing hooks.
+Merge the contents of [`hooks.json`](hooks.json) into the `"hooks"` key of your `~/.claude/settings.json`. If you don't have a settings file yet, the update script (step 5) creates one for you.
 
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/monitor.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/monitor.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/monitor.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "matcher": "permission_prompt|idle_prompt",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/monitor.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/monitor.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}
+<details>
+<summary>Full hooks.json for reference</summary>
+
+The monitor listens for 7 hook events: `SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`, `Notification` (permission_prompt only), and `SessionEnd`. See [`hooks.json`](hooks.json) for the exact configuration.
+
+</details>
+
+#### 5. Compile, configure, and launch
+
+If you cloned the repo, the update script handles everything — copies files, merges hooks into `settings.json`, builds, and restarts:
+
+```bash
+./update.sh
 ```
 
-#### 5. Compile and launch
+Or build manually:
 
 ```bash
 ~/.claude/monitor/build.sh
@@ -189,6 +140,16 @@ Add the following to your `~/.claude/settings.json`. If you already have a `"hoo
 The floating panel appears in the top-right corner. Drag to reposition — it remembers where you put it.
 
 </details>
+
+### Updating
+
+Run the update script to copy files, update hooks, rebuild, and restart in one step:
+
+```bash
+./update.sh
+```
+
+This copies `claude_monitor.swift`, `build.sh`, and `monitor.sh` to their install locations, merges hook config into `~/.claude/settings.json`, preserves your existing `config.json`, and restarts the monitor.
 
 ### Verify it works
 
@@ -346,7 +307,7 @@ rm -rf ~/.claude/monitor
 rm ~/.claude/hooks/monitor.sh
 ```
 
-Then remove the 5 hook entries (`SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionEnd`) from `~/.claude/settings.json`.
+Then remove the 7 hook entries (`SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`, `Notification`, `SessionEnd`) from `~/.claude/settings.json`.
 
 ## File Layout
 
