@@ -455,7 +455,7 @@ class SessionReader: ObservableObject {
             [ -z "$tty_name" ] || [ "$tty_name" = "??" ] && continue
             grep -rlq "/dev/$tty_name" "$SESSIONS_DIR" 2>/dev/null && continue
             cwd=$(lsof -p "$pid" -d cwd -Fn 2>/dev/null | tail -1 | cut -c2-)
-            [ -z "$cwd" ] && continue
+            [ -z "$cwd" ] || [ "$cwd" = "/" ] && continue
             project=$(basename "$cwd")
             sid="discovered-${tty_name}"
             jq -n --arg sid "$sid" --arg project "$project" --arg cwd "$cwd" --arg term_sid "/dev/$tty_name" --arg now "$NOW" '{session_id:$sid,status:"working",project:$project,cwd:$cwd,terminal:"terminal",terminal_session_id:$term_sid,started_at:$now,updated_at:$now,last_prompt:""}' > "$SESSIONS_DIR/$sid.json.tmp" && mv "$SESSIONS_DIR/$sid.json.tmp" "$SESSIONS_DIR/$sid.json"
