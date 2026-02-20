@@ -221,17 +221,34 @@ create_session() {
 }
 
 # --- Handle events ---
+    # Helper: remove stale session files for the same terminal tab (different session_id)
+cleanup_same_terminal() {
+    [ -z "$TERM_SID" ] && return
+    for f in "$SESSIONS_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        local fid
+        fid=$(basename "$f" .json)
+        [ "$fid" = "$SESSION_ID" ] && continue
+        # Remove if same terminal_session_id
+        if jq -e --arg tid "$TERM_SID" '.terminal_session_id == $tid' "$f" >/dev/null 2>&1; then
+            rm -f "$f"
+        fi
+    done
+}
+
 case "$EVENT" in
     SessionStart)
         SOURCE=$(echo "$INPUT" | jq -r '.source // "startup"')
         case "$SOURCE" in
             startup)
+                cleanup_same_terminal
                 create_session "starting"
                 if should_announce start; then
                     announce "$PROJECT_NAME starting" &
                 fi
                 ;;
             resume)
+                cleanup_same_terminal
                 if [ -f "$SESSION_FILE" ]; then
                     update_session "starting"
                 else

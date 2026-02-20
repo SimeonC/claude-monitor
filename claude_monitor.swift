@@ -454,12 +454,53 @@ class SessionReader: ObservableObject {
             }
         }
 
-        // Sort: attention first, then working, then starting, then done
-        let order: [String: Int] = ["attention": 0, "working": 1, "starting": 2, "done": 3]
-        loaded.sort { (order[$0.status] ?? 9) < (order[$1.status] ?? 9) }
+        // Aggregate sessions with the same project name
+        let statusPriority: [String: Int] = ["attention": 0, "working": 1, "done": 2, "starting": 3]
+        var grouped: [String: [SessionInfo]] = [:]
+        for s in loaded { grouped[s.project, default: []].append(s) }
+
+        var aggregated: [SessionInfo] = []
+        for (_, group) in grouped {
+            if group.count == 1 {
+                aggregated.append(group[0])
+                continue
+            }
+            // Pick representative: highest-priority status
+            let best = group.min { (statusPriority[$0.status] ?? 9) < (statusPriority[$1.status] ?? 9) }!
+            var merged = best
+            // Use first non-empty description
+            if merged.last_prompt.isEmpty {
+                merged.last_prompt = group.first(where: { !$0.last_prompt.isEmpty })?.last_prompt ?? ""
+            }
+            // Use earliest started_at for largest elapsed time
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            var earliest = merged.started_at
+            var earliestDate: Date? = formatter.date(from: earliest) ?? {
+                formatter.formatOptions = [.withInternetDateTime]
+                return formatter.date(from: earliest)
+            }()
+            for s in group {
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let d = formatter.date(from: s.started_at) ?? {
+                    formatter.formatOptions = [.withInternetDateTime]
+                    return formatter.date(from: s.started_at)
+                }() {
+                    if earliestDate == nil || d < earliestDate! {
+                        earliestDate = d
+                        earliest = s.started_at
+                    }
+                }
+            }
+            merged.started_at = earliest
+            aggregated.append(merged)
+        }
+
+        // Sort: attention first, then working, then done, then starting
+        aggregated.sort { (statusPriority[$0.status] ?? 9) < (statusPriority[$1.status] ?? 9) }
 
         DispatchQueue.main.async {
-            self.sessions = loaded
+            self.sessions = aggregated
         }
     }
 
