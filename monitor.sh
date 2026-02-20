@@ -34,6 +34,29 @@ PROJECT=$(basename "${CWD:-unknown}")
 PROJECT_NAME=$(echo "$PROJECT" | sed 's/[-_]/ /g')
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+# --- Sub-agent detection ---
+# Skip hooks fired by sub-agents (team members, Task tool agents).
+# Process tree: monitor.sh → sh → claude (this session) → ... → claude (parent session)
+# If we find TWO claude ancestors, we're a sub-agent.
+is_subagent() {
+    local pid=$$ claude_count=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -z "$pid" ] || [ "$pid" = "1" ] || [ "$pid" = "0" ] && break
+        local comm
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)
+        if [ "$comm" = "claude" ]; then
+            claude_count=$((claude_count + 1))
+            [ "$claude_count" -ge 2 ] && return 0
+        fi
+    done
+    return 1
+}
+
+if is_subagent; then
+    exit 0
+fi
+
 # --- Detect terminal + session ID for click-to-switch ---
 detect_terminal() {
     local term_app=""
@@ -201,15 +224,32 @@ create_session() {
 case "$EVENT" in
     SessionStart)
         SOURCE=$(echo "$INPUT" | jq -r '.source // "startup"')
-        if [ "$SOURCE" = "resume" ] && [ -f "$SESSION_FILE" ]; then
-            # Resuming — update existing session, keep started_at/last_prompt
-            update_session "starting"
-        else
-            create_session "starting"
-        fi
-        if should_announce start; then
-            announce "$PROJECT_NAME starting" &
-        fi
+        case "$SOURCE" in
+            startup)
+                create_session "starting"
+                if should_announce start; then
+                    announce "$PROJECT_NAME starting" &
+                fi
+                ;;
+            resume)
+                if [ -f "$SESSION_FILE" ]; then
+                    update_session "starting"
+                else
+                    create_session "starting"
+                fi
+                if should_announce start; then
+                    announce "$PROJECT_NAME starting" &
+                fi
+                ;;
+            *)
+                # Unknown source (e.g. /clear, /compact) — session is idle, mark done
+                if [ -f "$SESSION_FILE" ]; then
+                    update_session "done"
+                else
+                    create_session "done"
+                fi
+                ;;
+        esac
         ;;
 
     UserPromptSubmit)
@@ -273,9 +313,12 @@ case "$EVENT" in
         ;;
 
     SessionEnd)
-        # Remove session file after short delay so UI can show "done" briefly
-        (sleep 5 && rm -f "$SESSION_FILE") &
-        disown 2>/dev/null
+        # Mark done instead of deleting — /clear fires SessionEnd then SessionStart,
+        # so deleting would make it look like the session closed.
+        # The TTY liveness pruner in the Swift app handles truly dead sessions.
+        if [ -f "$SESSION_FILE" ]; then
+            update_session "done"
+        fi
         ;;
 esac
 
