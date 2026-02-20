@@ -121,37 +121,58 @@ Add the following to your `~/.claude/settings.json`. If you already have a `"hoo
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup|resume",
         "hooks": [
-          { "type": "command", "command": "$HOME/.claude/hooks/monitor.sh SessionStart" }
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/monitor.sh",
+            "timeout": 10
+          }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "$HOME/.claude/hooks/monitor.sh UserPromptSubmit" }
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/monitor.sh",
+            "timeout": 10
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "$HOME/.claude/hooks/monitor.sh Stop" }
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/monitor.sh",
+            "timeout": 10
+          }
         ]
       }
     ],
     "Notification": [
       {
-        "matcher": "permission_prompt",
+        "matcher": "permission_prompt|idle_prompt",
         "hooks": [
-          { "type": "command", "command": "$HOME/.claude/hooks/monitor.sh Notification" }
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/monitor.sh",
+            "timeout": 10
+          }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "$HOME/.claude/hooks/monitor.sh SessionEnd" }
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/monitor.sh",
+            "timeout": 10
+          }
         ]
       }
     ]

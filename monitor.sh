@@ -1,15 +1,17 @@
 #!/bin/bash
 # ~/.claude/hooks/monitor.sh
 # Claude Code lifecycle hook — writes session JSON + triggers TTS
-# Called by all 5 hook events: SessionStart, UserPromptSubmit, Stop, Notification, SessionEnd
+# Called by hook events: SessionStart, UserPromptSubmit, Stop, Notification, SessionEnd
 #
-# Usage: monitor.sh <event>
-# Receives hook JSON on stdin
+# Usage: monitor.sh [event]
+# Receives hook JSON on stdin (event auto-detected from hook_event_name if arg omitted)
 
 set -euo pipefail
 
-EVENT="${1:-unknown}"
 INPUT=$(cat)
+
+# Event from arg, or fall back to hook_event_name in the JSON input
+EVENT="${1:-$(echo "$INPUT" | jq -r '.hook_event_name // "unknown"')}"
 
 # --- Paths ---
 MONITOR_DIR="$HOME/.claude/monitor"
@@ -198,7 +200,13 @@ create_session() {
 # --- Handle events ---
 case "$EVENT" in
     SessionStart)
-        create_session "starting"
+        SOURCE=$(echo "$INPUT" | jq -r '.source // "startup"')
+        if [ "$SOURCE" = "resume" ] && [ -f "$SESSION_FILE" ]; then
+            # Resuming — update existing session, keep started_at/last_prompt
+            update_session "starting"
+        else
+            create_session "starting"
+        fi
         if should_announce start; then
             announce "$PROJECT_NAME starting" &
         fi
@@ -233,13 +241,17 @@ case "$EVENT" in
         ;;
 
     Notification)
+        NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
         if [ -f "$SESSION_FILE" ]; then
             update_session "attention"
         else
             create_session "attention"
         fi
         if should_announce attention; then
-            announce "$PROJECT_NAME needs attention" &
+            case "$NOTIF_TYPE" in
+                idle_prompt)   announce "$PROJECT_NAME is idle" & ;;
+                *)             announce "$PROJECT_NAME needs attention" & ;;
+            esac
         fi
         ;;
 
