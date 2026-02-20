@@ -308,8 +308,14 @@ case "$EVENT" in
     Notification)
         NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
         # idle_prompt means Claude is waiting for input — that's "done", not "attention"
+        # But don't override "working" or "attention" — those mean a tool is running or
+        # a permission prompt is active. Stop/PostToolUse handle those transitions.
         if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
             if [ -f "$SESSION_FILE" ]; then
+                CURRENT_STATUS=$(jq -r '.status // "unknown"' "$SESSION_FILE")
+                if [ "$CURRENT_STATUS" = "working" ] || [ "$CURRENT_STATUS" = "attention" ]; then
+                    exit 0
+                fi
                 update_session "done"
             else
                 create_session "done"

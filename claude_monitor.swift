@@ -263,6 +263,112 @@ class ConfigManager: ObservableObject {
     }
 }
 
+// MARK: - Color Constants
+
+extension Color {
+    static let workingBlue = Color(red: 0.204, green: 0.455, blue: 1.0)   // #3474FF
+    static let doneGreen   = Color(red: 0.494, green: 0.980, blue: 0.392) // #7EFA64
+}
+
+// MARK: - Team Model
+
+struct TeamMember: Codable {
+    let name: String
+    let agentType: String
+    let model: String?
+    let color: String?
+    let isActive: Bool?
+}
+
+struct TeamConfig: Codable {
+    let name: String
+    let description: String?
+    let leadSessionId: String?
+    let members: [TeamMember]?
+}
+
+struct TaskInfo: Codable {
+    let subject: String?
+    let status: String?
+    let owner: String?
+    let activeForm: String?
+}
+
+struct TeamInfo {
+    let name: String
+    let activeAgentCount: Int  // active members excluding lead
+    let members: [TeamMember]
+    let tasks: [TaskInfo]
+}
+
+// MARK: - Team Reader
+
+class TeamReader: ObservableObject {
+    @Published var teamsBySession: [String: TeamInfo] = [:]
+    private var timer: Timer?
+
+    private let teamsDir: String = {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/.claude/teams"
+    }()
+
+    private let tasksDir: String = {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/.claude/tasks"
+    }()
+
+    init() {
+        readTeams()
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.readTeams()
+        }
+    }
+
+    func readTeams() {
+        let fm = FileManager.default
+        guard let teamDirs = try? fm.contentsOfDirectory(atPath: teamsDir) else {
+            DispatchQueue.main.async { self.teamsBySession = [:] }
+            return
+        }
+
+        var result: [String: TeamInfo] = [:]
+
+        for teamDir in teamDirs {
+            let configPath = "\(teamsDir)/\(teamDir)/config.json"
+            guard let data = fm.contents(atPath: configPath),
+                  let config = try? JSONDecoder().decode(TeamConfig.self, from: data),
+                  let leadSessionId = config.leadSessionId, !leadSessionId.isEmpty else { continue }
+
+            let members = config.members ?? []
+            let activeCount = members.filter { ($0.isActive ?? false) }.count
+
+            // Read tasks for this team
+            var tasks: [TaskInfo] = []
+            let teamTasksDir = "\(tasksDir)/\(teamDir)"
+            if let taskFiles = try? fm.contentsOfDirectory(atPath: teamTasksDir) {
+                for taskFile in taskFiles where taskFile.hasSuffix(".json") {
+                    let taskPath = "\(teamTasksDir)/\(taskFile)"
+                    if let taskData = fm.contents(atPath: taskPath),
+                       let task = try? JSONDecoder().decode(TaskInfo.self, from: taskData) {
+                        tasks.append(task)
+                    }
+                }
+            }
+
+            result[leadSessionId] = TeamInfo(
+                name: config.name,
+                activeAgentCount: activeCount,
+                members: members,
+                tasks: tasks
+            )
+        }
+
+        DispatchQueue.main.async {
+            self.teamsBySession = result
+        }
+    }
+}
+
 // MARK: - Session Model
 
 struct SessionInfo: Codable, Identifiable {
@@ -298,8 +404,8 @@ struct SessionInfo: Codable, Identifiable {
     var statusColor: Color {
         switch status {
         case "starting":  return .gray
-        case "working":   return .cyan
-        case "done":      return .green
+        case "working":   return .workingBlue
+        case "done":      return .doneGreen
         case "attention": return .orange
         default:          return .gray
         }
@@ -496,8 +602,8 @@ class SessionReader: ObservableObject {
             aggregated.append(merged)
         }
 
-        // Sort: attention first, then working, then done, then starting
-        aggregated.sort { (statusPriority[$0.status] ?? 9) < (statusPriority[$1.status] ?? 9) }
+        // Sort alphabetically by project name for stable ordering
+        aggregated.sort { $0.project.localizedCaseInsensitiveCompare($1.project) == .orderedAscending }
 
         DispatchQueue.main.async {
             self.sessions = aggregated
@@ -733,6 +839,7 @@ struct PulsingDot: View {
 
 struct SessionRowView: View {
     let session: SessionInfo
+    var teamInfo: TeamInfo? = nil
     var onKill: (() -> Void)? = nil
     @State private var isHovered = false
     @State private var isKilling = false
@@ -763,6 +870,22 @@ struct SessionRowView: View {
                             Capsule()
                                 .fill(session.statusColor.opacity(session.isStale ? 0.08 : 0.2))
                         )
+
+                    if let team = teamInfo, team.activeAgentCount > 0 {
+                        HStack(spacing: 3) {
+                            Image(systemName: "person.2.fill")
+                                .font(.system(size: 8))
+                            Text("\(team.activeAgentCount)")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        }
+                        .foregroundColor(.white.opacity(0.5))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(Color.white.opacity(0.08))
+                        )
+                    }
 
                     Spacer()
 
@@ -1042,18 +1165,18 @@ struct HeaderBar: View {
                 }
                 if workingCount > 0 {
                     HStack(spacing: 3) {
-                        Circle().fill(Color.cyan).frame(width: 6, height: 6)
+                        Circle().fill(Color.workingBlue).frame(width: 6, height: 6)
                         Text("\(workingCount)")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.cyan)
+                            .foregroundColor(.workingBlue)
                     }
                 }
                 if doneCount > 0 {
                     HStack(spacing: 3) {
-                        Circle().fill(Color.green).frame(width: 6, height: 6)
+                        Circle().fill(Color.doneGreen).frame(width: 6, height: 6)
                         Text("\(doneCount)")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.green)
+                            .foregroundColor(.doneGreen)
                     }
                 }
 
@@ -1083,6 +1206,7 @@ struct HeaderBar: View {
 
 struct MonitorContentView: View {
     @ObservedObject var reader: SessionReader
+    @ObservedObject var teamReader: TeamReader
     @ObservedObject var configManager: ConfigManager
     @State private var isExpanded = true
 
@@ -1101,7 +1225,11 @@ struct MonitorContentView: View {
                             Button {
                                 switchToSession(session)
                             } label: {
-                                SessionRowView(session: session, onKill: { killSession(session) })
+                                SessionRowView(
+                                    session: session,
+                                    teamInfo: teamReader.teamsBySession[session.session_id],
+                                    onKill: { killSession(session) }
+                                )
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -1114,7 +1242,7 @@ struct MonitorContentView: View {
                     }
                     .background(ScrollbarStyler())
                 }
-                .frame(maxHeight: 300)
+                .frame(maxHeight: 600)
             }
         }
         .frame(width: 280)
@@ -1267,6 +1395,7 @@ struct WindowDragHandle: NSViewRepresentable {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: FloatingPanel!
     let reader = SessionReader()
+    let teamReader = TeamReader()
     let configManager = ConfigManager()
     var sizeObserver: AnyCancellable?
 
@@ -1276,7 +1405,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel = FloatingPanel()
 
         let hostingView = ClickHostingView(
-            rootView: MonitorContentView(reader: reader, configManager: configManager)
+            rootView: MonitorContentView(reader: reader, teamReader: teamReader, configManager: configManager)
         )
         hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: 40))
         hostingView.wantsLayer = true
