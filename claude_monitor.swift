@@ -375,7 +375,7 @@ class SessionReader: ObservableObject {
         var ttyMap: [String: [String]] = [:]
         for session in currentSessions {
             guard !session.terminal_session_id.isEmpty else { continue }
-            if session.terminal == "terminal" {
+            if session.terminal == "terminal" || session.terminal == "ghostty" {
                 let ttyName = session.terminal_session_id.replacingOccurrences(of: "/dev/", with: "")
                 ttyMap[ttyName, default: []].append(session.session_id)
             }
@@ -473,6 +473,8 @@ func switchToSession(_ session: SessionInfo) {
     NSLog("[ClaudeMonitor] switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project)")
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
+    } else if session.terminal == "ghostty" {
+        switchToGhostty(cwd: session.cwd)
     } else if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
         switchToTerminal(ttyPath: session.terminal_session_id)
     } else {
@@ -536,6 +538,72 @@ func switchToTerminal(ttyPath: String) {
         var error: NSDictionary?
         appleScript.executeAndReturnError(&error)
     }
+}
+
+func debugLog(_ msg: String) {
+    let path = FileManager.default.homeDirectoryForCurrentUser.path + "/.claude/monitor/debug.log"
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
+    if let fh = FileHandle(forWritingAtPath: path) {
+        fh.seekToEndOfFile()
+        fh.write(line.data(using: .utf8)!)
+        fh.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
+    }
+}
+
+func switchToGhostty(cwd: String) {
+    let basename = (cwd as NSString).lastPathComponent
+    debugLog("switchToGhostty cwd=\(cwd) basename=\(basename)")
+
+    // Find the Ghostty process
+    guard let ghosttyApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first
+          ?? NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Ghostty" }) else {
+        debugLog("Ghostty not running")
+        return
+    }
+    debugLog("Found Ghostty PID=\(ghosttyApp.processIdentifier)")
+
+    let appElement = AXUIElementCreateApplication(ghosttyApp.processIdentifier)
+
+    // Check/request accessibility
+    let opts = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
+    let trusted = AXIsProcessTrustedWithOptions(opts)
+    debugLog("AXIsProcessTrusted=\(trusted)")
+
+    // Get all windows
+    var windowsRef: CFTypeRef?
+    let axErr = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
+    debugLog("AXCopyWindows error=\(axErr.rawValue)")
+
+    guard axErr == .success, let windows = windowsRef as? [AXUIElement] else {
+        debugLog("Could not get windows — activating Ghostty as fallback")
+        ghosttyApp.activate()
+        return
+    }
+
+    debugLog("Window count=\(windows.count)")
+
+    // Find window whose title contains project basename or cwd
+    var matched = false
+    for window in windows {
+        var titleRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef) == .success,
+              let title = titleRef as? String else { continue }
+        debugLog("  Window title: '\(title)'")
+
+        if title.contains(basename) || title.contains(cwd) {
+            let raiseErr = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            debugLog("  MATCHED — AXRaise error=\(raiseErr.rawValue)")
+            matched = true
+            break
+        }
+    }
+
+    if !matched {
+        debugLog("No window matched '\(basename)'")
+    }
+    ghosttyApp.activate()
 }
 
 func switchByTerminalCwd(cwd: String) {
@@ -639,27 +707,30 @@ struct SessionRowView: View {
     @State private var isKilling = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            PulsingDot(
-                color: session.statusColor,
-                isPulsing: session.status == "working"
-            )
+        HStack(alignment: .top, spacing: 8) {
+            Color.clear.frame(width: 0, height: 0)
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
+                    PulsingDot(
+                        color: session.statusColor,
+                        isPulsing: session.status == "working"
+                    )
+                    .offset(y: 1)
+
                     Text(session.project)
-                        .font(.system(size: 12, weight: .semibold, design: .default))
+                        .font(.system(size: 13, weight: .semibold, design: .default))
                         .foregroundColor(session.isStale ? .gray : .white)
                         .lineLimit(1)
 
                     Text(session.status)
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundColor(session.statusColor.opacity(session.isStale ? 0.5 : 0.8))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(session.statusColor.opacity(session.isStale ? 0.6 : 1.0))
                         .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
+                        .padding(.vertical, 2)
                         .background(
                             Capsule()
-                                .fill(session.statusColor.opacity(session.isStale ? 0.05 : 0.15))
+                                .fill(session.statusColor.opacity(session.isStale ? 0.08 : 0.2))
                         )
 
                     Spacer()
@@ -674,8 +745,8 @@ struct SessionRowView: View {
                                     onKill?()
                                 } label: {
                                     Image(systemName: "xmark")
-                                        .font(.system(size: 9, weight: .semibold))
-                                        .foregroundColor(.white.opacity(0.35))
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundColor(.white.opacity(0.4))
                                         .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
@@ -685,21 +756,22 @@ struct SessionRowView: View {
                     }
 
                     Text(session.elapsedString)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.gray)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.5))
                 }
 
                 if !session.last_prompt.isEmpty {
                     Text(session.last_prompt)
-                        .font(.system(size: 10))
-                        .foregroundColor(.white.opacity(0.4))
-                        .lineLimit(1)
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.55))
+                        .lineLimit(2)
                         .truncationMode(.tail)
                 }
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.top, 0)
+        .padding(.bottom, 8)
         .onHover { isHovered = $0 }
     }
 }
@@ -919,11 +991,11 @@ struct HeaderBar: View {
         HStack(spacing: 10) {
             HStack(spacing: 4) {
                 Image(systemName: "terminal.fill")
-                    .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.6))
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.7))
                 Text("Claude")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.8))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
             }
 
             Spacer()
@@ -1017,14 +1089,13 @@ struct MonitorContentView: View {
         .frame(width: 280)
         .fixedSize(horizontal: false, vertical: true)
         .background(
-            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(nsColor: NSColor(red: 0.129, green: 0.016, blue: 0.314, alpha: 1.0)))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
         )
-        .shadow(color: .black.opacity(0.3), radius: 10, y: 5)
     }
 }
 

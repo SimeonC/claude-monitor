@@ -50,11 +50,19 @@ detect_terminal() {
         [ -z "$pid" ] || [ "$pid" = "1" ] && break
         tty_name=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
         if [ -n "$tty_name" ] && [ "$tty_name" != "??" ]; then
-            term_app="terminal"
-            term_session_id="/dev/$tty_name"
             break
         fi
     done
+
+    if [ -n "${GHOSTTY_RESOURCES_DIR:-}" ]; then
+        echo "ghostty|/dev/$tty_name"
+        return
+    fi
+
+    if [ -n "$tty_name" ] && [ "$tty_name" != "??" ]; then
+        term_app="terminal"
+        term_session_id="/dev/$tty_name"
+    fi
 
     echo "$term_app|$term_session_id"
 }

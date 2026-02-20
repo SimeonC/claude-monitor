@@ -25,13 +25,18 @@ fi
 
 echo "Build successful."
 
-# Kill existing instance if running
-pkill -f "claude_monitor$" 2>/dev/null || true
-sleep 0.5
+LABEL="com.claude.monitor"
 
-# Launch
-echo "Launching Claude Monitor..."
-"$BINARY" &
-disown 2>/dev/null
+# Restart via launchctl if agent is loaded, otherwise launch directly
+if launchctl print "gui/$(id -u)/$LABEL" &>/dev/null; then
+    echo "Restarting via launchctl..."
+    launchctl kickstart -k "gui/$(id -u)/$LABEL"
+else
+    pkill -f "claude_monitor$" 2>/dev/null || true
+    sleep 0.5
+    echo "Launching Claude Monitor..."
+    "$BINARY" &
+    disown 2>/dev/null
+fi
 
 echo "Claude Monitor is running."
