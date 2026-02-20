@@ -559,68 +559,39 @@ func switchToTerminal(ttyPath: String) {
     }
 }
 
-func debugLog(_ msg: String) {
-    let path = FileManager.default.homeDirectoryForCurrentUser.path + "/.claude/monitor/debug.log"
-    let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
-    if let fh = FileHandle(forWritingAtPath: path) {
-        fh.seekToEndOfFile()
-        fh.write(line.data(using: .utf8)!)
-        fh.closeFile()
-    } else {
-        FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
-    }
-}
-
 func switchToGhostty(cwd: String) {
     let basename = (cwd as NSString).lastPathComponent
-    debugLog("switchToGhostty cwd=\(cwd) basename=\(basename)")
 
     // Find the Ghostty process
     guard let ghosttyApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first
           ?? NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Ghostty" }) else {
-        debugLog("Ghostty not running")
         return
     }
-    debugLog("Found Ghostty PID=\(ghosttyApp.processIdentifier)")
 
     let appElement = AXUIElementCreateApplication(ghosttyApp.processIdentifier)
 
-    // Check/request accessibility
+    // Request accessibility if needed
     let opts = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
-    let trusted = AXIsProcessTrustedWithOptions(opts)
-    debugLog("AXIsProcessTrusted=\(trusted)")
+    _ = AXIsProcessTrustedWithOptions(opts)
 
     // Get all windows
     var windowsRef: CFTypeRef?
-    let axErr = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
-    debugLog("AXCopyWindows error=\(axErr.rawValue)")
-
-    guard axErr == .success, let windows = windowsRef as? [AXUIElement] else {
-        debugLog("Could not get windows — activating Ghostty as fallback")
+    guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+          let windows = windowsRef as? [AXUIElement] else {
         ghosttyApp.activate()
         return
     }
 
-    debugLog("Window count=\(windows.count)")
-
     // Find window whose title contains project basename or cwd
-    var matched = false
     for window in windows {
         var titleRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef) == .success,
               let title = titleRef as? String else { continue }
-        debugLog("  Window title: '\(title)'")
 
         if title.contains(basename) || title.contains(cwd) {
-            let raiseErr = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            debugLog("  MATCHED — AXRaise error=\(raiseErr.rawValue)")
-            matched = true
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             break
         }
-    }
-
-    if !matched {
-        debugLog("No window matched '\(basename)'")
     }
     ghosttyApp.activate()
 }
