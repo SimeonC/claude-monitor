@@ -1,6 +1,6 @@
 import Cocoa
-import SwiftUI
 import Combine
+import SwiftUI
 
 // MARK: - Config Manager
 
@@ -79,7 +79,8 @@ class VoiceFetcher: ObservableObject {
 
         URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             guard let data = data,
-                  let response = try? JSONDecoder().decode(ElevenLabsVoicesResponse.self, from: data) else {
+                let response = try? JSONDecoder().decode(ElevenLabsVoicesResponse.self, from: data)
+            else {
                 return
             }
             // Only show user's own voices (cloned, generated, professional), not premade
@@ -99,14 +100,21 @@ class VoiceFetcher: ObservableObject {
     }
 
     func resolveVoiceName(id: String, completion: @escaping (String?) -> Void) {
-        guard let apiKey = apiKey, !apiKey.isEmpty else { completion(nil); return }
-        guard let url = URL(string: "https://api.elevenlabs.io/v1/voices/\(id)") else { completion(nil); return }
+        guard let apiKey = apiKey, !apiKey.isEmpty else {
+            completion(nil)
+            return
+        }
+        guard let url = URL(string: "https://api.elevenlabs.io/v1/voices/\(id)") else {
+            completion(nil)
+            return
+        }
         var request = URLRequest(url: url)
         request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         URLSession.shared.dataTask(with: request) { data, _, _ in
             guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let name = json["name"] as? String else {
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let name = json["name"] as? String
+            else {
                 completion(nil)
                 return
             }
@@ -115,9 +123,17 @@ class VoiceFetcher: ObservableObject {
     }
 
     /// Design a voice from a text prompt, save it, and return the voice_id + name
-    func designVoice(prompt: String, name: String, completion: @escaping (String?, String?) -> Void) {
-        guard let apiKey = apiKey, !apiKey.isEmpty else { completion(nil, nil); return }
-        guard let designURL = URL(string: "https://api.elevenlabs.io/v1/text-to-voice/design") else { completion(nil, nil); return }
+    func designVoice(prompt: String, name: String, completion: @escaping (String?, String?) -> Void)
+    {
+        guard let apiKey = apiKey, !apiKey.isEmpty else {
+            completion(nil, nil)
+            return
+        }
+        guard let designURL = URL(string: "https://api.elevenlabs.io/v1/text-to-voice/design")
+        else {
+            completion(nil, nil)
+            return
+        }
 
         // Step 1: Generate preview
         var request = URLRequest(url: designURL)
@@ -127,31 +143,43 @@ class VoiceFetcher: ObservableObject {
 
         let body: [String: Any] = [
             "voice_description": prompt,
-            "text": "Hello. A session just finished — your project is done and ready for review. Another session needs your attention, it looks like there is a permission prompt waiting. Everything else is still running smoothly.",
+            "text":
+                "Hello. A session just finished — your project is done and ready for review. Another session needs your attention, it looks like there is a permission prompt waiting. Everything else is still running smoothly.",
             "model_id": "eleven_multilingual_ttv_v2",
             "guidance_scale": 5,
-            "quality": 0.9
+            "quality": 0.9,
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let previews = json["previews"] as? [[String: Any]],
-                  let first = previews.first,
-                  let generatedId = first["generated_voice_id"] as? String else {
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let previews = json["previews"] as? [[String: Any]],
+                let first = previews.first,
+                let generatedId = first["generated_voice_id"] as? String
+            else {
                 completion(nil, nil)
                 return
             }
 
             // Step 2: Save as permanent voice
-            self?.saveDesignedVoice(generatedId: generatedId, name: name, prompt: prompt, completion: completion)
+            self?.saveDesignedVoice(
+                generatedId: generatedId, name: name, prompt: prompt, completion: completion)
         }.resume()
     }
 
-    private func saveDesignedVoice(generatedId: String, name: String, prompt: String, completion: @escaping (String?, String?) -> Void) {
-        guard let apiKey = apiKey, !apiKey.isEmpty else { completion(nil, nil); return }
-        guard let url = URL(string: "https://api.elevenlabs.io/v1/text-to-voice") else { completion(nil, nil); return }
+    private func saveDesignedVoice(
+        generatedId: String, name: String, prompt: String,
+        completion: @escaping (String?, String?) -> Void
+    ) {
+        guard let apiKey = apiKey, !apiKey.isEmpty else {
+            completion(nil, nil)
+            return
+        }
+        guard let url = URL(string: "https://api.elevenlabs.io/v1/text-to-voice") else {
+            completion(nil, nil)
+            return
+        }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -162,14 +190,15 @@ class VoiceFetcher: ObservableObject {
             "voice_name": name,
             "voice_description": prompt,
             "generated_voice_id": generatedId,
-            "labels": ["source": "claude-monitor"]
+            "labels": ["source": "claude-monitor"],
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         URLSession.shared.dataTask(with: request) { data, _, _ in
             guard let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let voiceId = json["voice_id"] as? String else {
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let voiceId = json["voice_id"] as? String
+            else {
                 completion(nil, nil)
                 return
             }
@@ -199,7 +228,8 @@ class ConfigManager: ObservableObject {
 
     func load() {
         guard let data = FileManager.default.contents(atPath: Self.configPath),
-              let decoded = try? JSONDecoder().decode(MonitorConfig.self, from: data) else { return }
+            let decoded = try? JSONDecoder().decode(MonitorConfig.self, from: data)
+        else { return }
         self.config = decoded
     }
 
@@ -266,8 +296,8 @@ class ConfigManager: ObservableObject {
 // MARK: - Color Constants
 
 extension Color {
-    static let workingBlue = Color(red: 0.204, green: 0.455, blue: 1.0)   // #3474FF
-    static let doneGreen   = Color(red: 0.494, green: 0.980, blue: 0.392) // #7EFA64
+    static let workingBlue = Color(red: 0.149, green: 0.694, blue: 0.941)  // #26B1F0
+    static let doneGreen = Color(red: 0.494, green: 0.980, blue: 0.392)  // #7EFA64
 }
 
 // MARK: - Team Model
@@ -305,7 +335,7 @@ struct TeamInfo {
 
 class TeamReader: ObservableObject {
     @Published var teamsBySession: [String: TeamInfo] = [:]
-    private var timer: Timer?
+    private var watcher: DirectoryWatcher?
 
     private let teamsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -319,8 +349,8 @@ class TeamReader: ObservableObject {
 
     init() {
         readTeams()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.readTeams()
+        watcher = DirectoryWatcher(paths: [teamsDir, tasksDir], latency: 0.5) { [weak self] in
+            DispatchQueue.main.async { self?.readTeams() }
         }
     }
 
@@ -336,8 +366,9 @@ class TeamReader: ObservableObject {
         for teamDir in teamDirs {
             let configPath = "\(teamsDir)/\(teamDir)/config.json"
             guard let data = fm.contents(atPath: configPath),
-                  let config = try? JSONDecoder().decode(TeamConfig.self, from: data),
-                  let leadSessionId = config.leadSessionId, !leadSessionId.isEmpty else { continue }
+                let config = try? JSONDecoder().decode(TeamConfig.self, from: data),
+                let leadSessionId = config.leadSessionId, !leadSessionId.isEmpty
+            else { continue }
 
             let members = config.members ?? []
             let activeCount = members.filter { ($0.isActive ?? false) }.count
@@ -349,7 +380,8 @@ class TeamReader: ObservableObject {
                 for taskFile in taskFiles where taskFile.hasSuffix(".json") {
                     let taskPath = "\(teamTasksDir)/\(taskFile)"
                     if let taskData = fm.contents(atPath: taskPath),
-                       let task = try? JSONDecoder().decode(TaskInfo.self, from: taskData) {
+                        let task = try? JSONDecoder().decode(TaskInfo.self, from: taskData)
+                    {
                         tasks.append(task)
                     }
                 }
@@ -369,6 +401,56 @@ class TeamReader: ObservableObject {
     }
 }
 
+// MARK: - Directory Watcher (FSEvents)
+
+class DirectoryWatcher {
+    private var stream: FSEventStreamRef?
+
+    init(paths: [String], latency: CFTimeInterval, callback: @escaping () -> Void) {
+        let ctx = UnsafeMutablePointer<() -> Void>.allocate(capacity: 1)
+        ctx.initialize(to: callback)
+
+        var context = FSEventStreamContext(
+            version: 0,
+            info: ctx,
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+
+        let cfPaths = paths as CFArray
+        stream = FSEventStreamCreate(
+            nil,
+            { _, info, _, _, _, _ in
+                guard let info = info else { return }
+                let cb = info.assumingMemoryBound(to: (() -> Void).self).pointee
+                cb()
+            },
+            &context,
+            cfPaths,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            latency,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes)
+        )
+
+        if let stream = stream {
+            FSEventStreamScheduleWithRunLoop(stream, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            FSEventStreamStart(stream)
+        }
+    }
+
+    func stop() {
+        if let stream = stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
+        }
+    }
+
+    deinit { stop() }
+}
+
 // MARK: - Session Model
 
 struct SessionInfo: Codable, Identifiable {
@@ -381,11 +463,31 @@ struct SessionInfo: Codable, Identifiable {
     var started_at: String
     var updated_at: String
     var last_prompt: String
+    var agent_count: Int
 
     var id: String { session_id }
 
     enum CodingKeys: String, CodingKey {
-        case session_id, status, project, cwd, terminal, terminal_session_id, started_at, updated_at, last_prompt
+        case session_id, status, project, cwd, terminal, terminal_session_id, started_at,
+            updated_at, last_prompt, agent_count
+    }
+
+    init(
+        session_id: String, status: String, project: String, cwd: String,
+        terminal: String, terminal_session_id: String,
+        started_at: String, updated_at: String, last_prompt: String,
+        agent_count: Int = 0
+    ) {
+        self.session_id = session_id
+        self.status = status
+        self.project = project
+        self.cwd = cwd
+        self.terminal = terminal
+        self.terminal_session_id = terminal_session_id
+        self.started_at = started_at
+        self.updated_at = updated_at
+        self.last_prompt = last_prompt
+        self.agent_count = agent_count
     }
 
     init(from decoder: Decoder) throws {
@@ -399,25 +501,26 @@ struct SessionInfo: Codable, Identifiable {
         started_at = (try? c.decode(String.self, forKey: .started_at)) ?? ""
         updated_at = (try? c.decode(String.self, forKey: .updated_at)) ?? ""
         last_prompt = (try? c.decode(String.self, forKey: .last_prompt)) ?? ""
+        agent_count = (try? c.decode(Int.self, forKey: .agent_count)) ?? 0
     }
 
     var statusColor: Color {
         switch status {
-        case "starting":  return .gray
-        case "working":   return .workingBlue
-        case "done":      return .doneGreen
+        case "starting": return .gray
+        case "working": return .workingBlue
+        case "done": return .doneGreen
         case "attention": return .orange
-        default:          return .gray
+        default: return .gray
         }
     }
 
     var statusIcon: String {
         switch status {
-        case "starting":  return "circle.dotted"
-        case "working":   return "circle.fill"
-        case "done":      return "checkmark.circle.fill"
+        case "starting": return "circle.dotted"
+        case "working": return "circle.fill"
+        case "done": return "checkmark.circle.fill"
         case "attention": return "exclamationmark.triangle.fill"
-        default:          return "circle"
+        default: return "circle"
         }
     }
 
@@ -434,7 +537,8 @@ struct SessionInfo: Codable, Identifiable {
         let elapsed = Date().timeIntervalSince(start)
         if elapsed < 60 { return "\(Int(elapsed))s" }
         if elapsed < 3600 { return "\(Int(elapsed / 60))m" }
-        return "\(Int(elapsed / 3600))h \(Int((elapsed.truncatingRemainder(dividingBy: 3600)) / 60))m"
+        return
+            "\(Int(elapsed / 3600))h \(Int((elapsed.truncatingRemainder(dividingBy: 3600)) / 60))m"
     }
 
     var isStale: Bool {
@@ -446,7 +550,7 @@ struct SessionInfo: Codable, Identifiable {
             date = formatter.date(from: updated_at)
         }
         guard let updated = date else { return false }
-        return Date().timeIntervalSince(updated) > 600 // 10 minutes
+        return Date().timeIntervalSince(updated) > 600  // 10 minutes
     }
 }
 
@@ -454,18 +558,24 @@ struct SessionInfo: Codable, Identifiable {
 
 class SessionReader: ObservableObject {
     @Published var sessions: [SessionInfo] = []
-    private var timer: Timer?
     private var livenessTimer: Timer?
     private var dirSource: DispatchSourceFileSystemObject?
-    private var livenessTickCount = 0
+    private var projectsWatcher: DirectoryWatcher?
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return "\(home)/.claude/monitor/sessions"
     }()
 
+    private let projectsDir: String = {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/.claude/projects"
+    }()
+
     init() {
         prunePreBootSessions()
+        cleanupLegacyDiscoveredSessions()
+        scanProjects()
         readSessions()
 
         // FSEvents: instant reload when session files change
@@ -484,11 +594,17 @@ class SessionReader: ObservableObject {
             dirSource = source
         }
 
-        // Fallback poll (catches edge cases FSEvents might miss)
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.readSessions()
+        // FSEvents on projects dir: detect new/changed JSONL files
+        projectsWatcher = DirectoryWatcher(paths: [projectsDir], latency: 1.0) { [weak self] in
+            DispatchQueue.main.async {
+                self?.scanProjects()
+                self?.readSessions()
+            }
         }
-        livenessTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+
+        // Liveness timer: prune dead sessions (absence of writes can't trigger FSEvents)
+        livenessTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) {
+            [weak self] _ in
             self?.pruneDeadSessions()
         }
     }
@@ -506,11 +622,13 @@ class SessionReader: ObservableObject {
             task.waitUntilExit()
         } catch { return }
 
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let output =
+            String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         // Format: "{ sec = 1234567890, usec = 123456 } ..."
         guard let secRange = output.range(of: "sec = "),
-              let secEnd = output[secRange.upperBound...].firstIndex(of: ","),
-              let bootEpoch = TimeInterval(output[secRange.upperBound..<secEnd].trimmingCharacters(in: .whitespaces))
+            let secEnd = output[secRange.upperBound...].firstIndex(of: ","),
+            let bootEpoch = TimeInterval(
+                output[secRange.upperBound..<secEnd].trimmingCharacters(in: .whitespaces))
         else { return }
         let bootTime = Date(timeIntervalSince1970: bootEpoch)
 
@@ -521,7 +639,7 @@ class SessionReader: ObservableObject {
         for file in files where file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
             guard let data = fm.contents(atPath: path),
-                  let session = try? JSONDecoder().decode(SessionInfo.self, from: data)
+                let session = try? JSONDecoder().decode(SessionInfo.self, from: data)
             else { continue }
 
             isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -532,48 +650,248 @@ class SessionReader: ObservableObject {
             }
             if let updated = updated, updated < bootTime {
                 try? fm.removeItem(atPath: path)
-                NSLog("[ClaudeMonitor] Pruned pre-boot session %@ (updated %@)", session.session_id, session.updated_at)
+                NSLog(
+                    "[ClaudeMonitor] Pruned pre-boot session %@ (updated %@)", session.session_id,
+                    session.updated_at)
+            }
+        }
+    }
+
+    /// Remove legacy `discovered-*` session files from the old TTY-based discovery system.
+    private func cleanupLegacyDiscoveredSessions() {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
+        for file in files where file.hasPrefix("discovered-") && file.hasSuffix(".json") {
+            try? fm.removeItem(atPath: "\(sessionsDir)/\(file)")
+            NSLog("[ClaudeMonitor] Removed legacy discovered session %@", file)
+        }
+    }
+
+    /// Read the last ~4KB of a JSONL file to extract cwd, latest user prompt, timestamp, and whether it's a subagent.
+    private func readJSONLTail(path: String) -> (
+        cwd: String, prompt: String, timestamp: String?, isSubagent: Bool
+    ) {
+        guard let fileHandle = FileHandle(forReadingAtPath: path) else {
+            return ("", "", nil, false)
+        }
+        defer { fileHandle.closeFile() }
+
+        let fileSize = fileHandle.seekToEndOfFile()
+        guard fileSize > 0 else { return ("", "", nil, false) }
+        let readSize: UInt64 = min(fileSize, 4096)
+        fileHandle.seek(toFileOffset: fileSize - readSize)
+        let data = fileHandle.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return ("", "", nil, false) }
+
+        let lines = text.components(separatedBy: "\n")
+        var cwd = ""
+        var prompt = ""
+        var timestamp: String? = nil
+        var isSubagent = false
+
+        for line in lines {
+            guard !line.isEmpty,
+                let lineData = line.data(using: .utf8),
+                let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+            else { continue }
+
+            if let ts = json["timestamp"] as? String {
+                timestamp = ts
+            }
+            if let c = json["cwd"] as? String, !c.isEmpty {
+                cwd = c
+            }
+            if json["agentName"] != nil {
+                isSubagent = true
+            }
+            // Extract user prompts: type=="user", message.content is a plain string (not tool results or teammate messages)
+            if let type = json["type"] as? String, type == "user",
+                !isSubagent,
+                let message = json["message"] as? [String: Any],
+                let content = message["content"] as? String,
+                !content.hasPrefix("<teammate-message")
+            {
+                prompt = String(content.prefix(200))
+            }
+        }
+
+        return (cwd, prompt, timestamp, isSubagent)
+    }
+
+    /// Write a SessionInfo to a JSON file atomically.
+    private func writeSessionFile(_ session: SessionInfo, to path: String) {
+        guard let data = try? JSONEncoder().encode(session) else { return }
+        let tmpPath = path + ".tmp"
+        try? data.write(to: URL(fileURLWithPath: tmpPath))
+        try? FileManager.default.moveItem(atPath: tmpPath, toPath: path)
+    }
+
+    /// Find the JSONL file path for a session ID by scanning project directories.
+    private func findJSONLPath(sessionId: String) -> String? {
+        let fm = FileManager.default
+        guard let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) else { return nil }
+        for projectDir in projectDirs {
+            let candidatePath = "\(projectsDir)/\(projectDir)/\(sessionId).jsonl"
+            if fm.fileExists(atPath: candidatePath) {
+                return candidatePath
+            }
+        }
+        return nil
+    }
+
+    /// Scan `~/.claude/projects/` JSONL files to discover and update sessions.
+    /// This is the primary session detection mechanism — replaces TTY-based discovery.
+    func scanProjects() {
+        let fm = FileManager.default
+        guard let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) else { return }
+        let now = Date()
+        let twoMinAgo = now.addingTimeInterval(-120)
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime]
+        let nowString = isoFormatter.string(from: now)
+
+        for projectDir in projectDirs {
+            let projectPath = "\(projectsDir)/\(projectDir)"
+
+            // Only look at top-level .jsonl files (skip subdirectories like session dirs and subagents/)
+            guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { continue }
+
+            for file in files where file.hasSuffix(".jsonl") {
+                let jsonlPath = "\(projectPath)/\(file)"
+
+                // Check mtime — only active sessions (modified within 2 min)
+                guard let attrs = try? fm.attributesOfItem(atPath: jsonlPath),
+                    let mtime = attrs[.modificationDate] as? Date
+                else { continue }
+                guard mtime > twoMinAgo else { continue }
+
+                let sessionId = String(file.dropLast(6))  // remove ".jsonl"
+
+                // Read last ~4KB to extract info
+                let (cwd, lastPrompt, lastTimestamp, isSubagent) = readJSONLTail(path: jsonlPath)
+
+                // Skip subagent sessions (team members, Task tool agents)
+                if isSubagent { continue }
+
+                // No cwd in tail → can't determine project, skip
+                if cwd.isEmpty { continue }
+
+                let project = (cwd as NSString).lastPathComponent
+
+                // Count active subagents
+                let subagentsDir = "\(projectPath)/\(sessionId)/subagents"
+                var agentCount = 0
+                if let subFiles = try? fm.contentsOfDirectory(atPath: subagentsDir) {
+                    for subFile in subFiles where subFile.hasSuffix(".jsonl") {
+                        let subPath = "\(subagentsDir)/\(subFile)"
+                        if let subAttrs = try? fm.attributesOfItem(atPath: subPath),
+                            let subMtime = subAttrs[.modificationDate] as? Date,
+                            subMtime > twoMinAgo
+                        {
+                            agentCount += 1
+                        }
+                    }
+                }
+
+                // Check existing monitor session file
+                let sessionFile = "\(sessionsDir)/\(sessionId).json"
+                if let data = fm.contents(atPath: sessionFile),
+                    let existing = try? JSONDecoder().decode(SessionInfo.self, from: data)
+                {
+                    // Update existing: keep terminal info from hooks
+                    var updated = existing
+                    if updated.project == "unknown" || updated.cwd.isEmpty {
+                        updated.project = project
+                        updated.cwd = cwd
+                    }
+                    if !lastPrompt.isEmpty {
+                        updated.last_prompt = lastPrompt
+                    }
+                    updated.agent_count = agentCount
+
+                    // Active JSONL means session is alive. Set status to "working",
+                    // but preserve "done" — hooks handle done→working on new user activity.
+                    if updated.status != "done" {
+                        updated.status = "working"
+                    }
+                    updated.updated_at = nowString
+                    writeSessionFile(updated, to: sessionFile)
+                } else {
+                    // Create new session file
+                    let session = SessionInfo(
+                        session_id: sessionId, status: "working",
+                        project: project, cwd: cwd,
+                        terminal: "", terminal_session_id: "",
+                        started_at: lastTimestamp ?? nowString,
+                        updated_at: nowString,
+                        last_prompt: lastPrompt,
+                        agent_count: agentCount
+                    )
+                    writeSessionFile(session, to: sessionFile)
+                }
             }
         }
     }
 
     /// Remove session files whose `claude` process is no longer running
     func pruneDeadSessions() {
-        let currentSessions = sessions
-        guard !currentSessions.isEmpty else { return }
-
-        // Separate sessions by terminal type
-        var ttyMap: [String: [String]] = [:]       // ttyName -> [session_id]
-        var itermSessions: [(id: String, termSid: String)] = []
-        var noTtySessions: [SessionInfo] = []
-
-        for session in currentSessions {
-            if session.terminal_session_id.isEmpty {
-                noTtySessions.append(session)
-                continue
-            }
-            if session.terminal == "iterm2" {
-                itermSessions.append((session.session_id, session.terminal_session_id))
-            } else {
-                // Terminal.app, Ghostty — terminal_session_id is the TTY
-                let ttyName = session.terminal_session_id.replacingOccurrences(of: "/dev/", with: "")
-                ttyMap[ttyName, default: []].append(session.session_id)
-            }
+        // Read raw files from disk instead of using aggregated `sessions` property,
+        // so every session file gets liveness-checked (not just deduplicated ones)
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
+        var currentSessions: [SessionInfo] = []
+        for file in files where file.hasSuffix(".json") {
+            let path = "\(sessionsDir)/\(file)"
+            guard let data = fm.contents(atPath: path),
+                let session = try? JSONDecoder().decode(SessionInfo.self, from: data)
+            else { continue }
+            currentSessions.append(session)
         }
-
-        // Auto-rediscovery: every 3rd tick (~15s), scan for claude processes with no session file
-        livenessTickCount += 1
-        let shouldRediscover = (livenessTickCount % 3 == 0)
+        guard !currentSessions.isEmpty else { return }
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
             var deadSessionIds: [String] = []
 
-            // --- Terminal/Ghostty: check for `claude` on each TTY ---
+            // --- Primary liveness: JSONL mtime check for ALL sessions ---
+            // Also separate sessions without JSONL by terminal type for fallback checks
+            var ttyMap: [String: [String]] = [:]  // ttyName -> [session_id]
+            var itermSessions: [(id: String, termSid: String)] = []
+            var noInfoSessions: [SessionInfo] = []
+
+            for session in currentSessions {
+                // First try JSONL mtime — most reliable per-session check
+                if let jsonlPath = self.findJSONLPath(sessionId: session.session_id),
+                    let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath),
+                    let mtime = attrs[.modificationDate] as? Date
+                {
+                    let age = Date().timeIntervalSince(mtime)
+                    // "done" sessions linger until isStale (10 min) so user can see them;
+                    // active sessions are pruned after 2 min of no JSONL writes.
+                    let threshold: TimeInterval = session.status == "done" ? 600 : 120
+                    if age > threshold {
+                        deadSessionIds.append(session.session_id)
+                    }
+                    continue  // JSONL check is authoritative, skip TTY fallback
+                }
+
+                // No JSONL found — use terminal-based fallback
+                if session.terminal_session_id.isEmpty {
+                    noInfoSessions.append(session)
+                } else if session.terminal == "iterm2" {
+                    itermSessions.append((session.session_id, session.terminal_session_id))
+                } else {
+                    let ttyName = session.terminal_session_id.replacingOccurrences(
+                        of: "/dev/", with: "")
+                    ttyMap[ttyName, default: []].append(session.session_id)
+                }
+            }
+
+            // --- Fallback: Terminal/Ghostty TTY check (only for sessions without JSONL) ---
             if !ttyMap.isEmpty {
                 let ttys = ttyMap.keys.joined(separator: " ")
-                // Check specifically for claude process, not just any process on the TTY
-                let script = "for tty in \(ttys); do ps -t \"$tty\" -o comm= 2>/dev/null | grep -q claude || echo \"$tty\"; done"
+                let script =
+                    "for tty in \(ttys); do ps -t \"$tty\" -o comm= 2>/dev/null | grep -q claude || echo \"$tty\"; done"
                 if let output = self.runShell(script) {
                     for tty in output.split(separator: "\n").map(String.init) {
                         if let sids = ttyMap[tty] { deadSessionIds.append(contentsOf: sids) }
@@ -581,14 +899,14 @@ class SessionReader: ObservableObject {
                 }
             }
 
-            // --- iTerm2: resolve TTYs via batched AppleScript ---
+            // --- Fallback: iTerm2 check (only for sessions without JSONL) ---
             if !itermSessions.isEmpty {
-                let itermRunning = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.googlecode.iterm2" }
+                let itermRunning = NSWorkspace.shared.runningApplications.contains {
+                    $0.bundleIdentifier == "com.googlecode.iterm2"
+                }
                 if !itermRunning {
-                    // iTerm2 not running — all iTerm sessions are dead
                     deadSessionIds.append(contentsOf: itermSessions.map(\.id))
                 } else {
-                    // terminal_session_id format: "w0t0p0:GUID" — extract GUIDs to look up
                     var guidToSessionId: [String: String] = [:]
                     for s in itermSessions {
                         let parts = s.termSid.split(separator: ":")
@@ -598,49 +916,49 @@ class SessionReader: ObservableObject {
                     }
 
                     if !guidToSessionId.isEmpty {
-                        // Single AppleScript: collect "GUID<tab>TTY" for every open session
                         let script = """
-                        tell application "iTerm2"
-                            set results to ""
-                            repeat with w in windows
-                                repeat with t in tabs of w
-                                    repeat with s in sessions of t
-                                        try
-                                            set results to results & (unique ID of s) & "\t" & (tty of s) & "\n"
-                                        end try
+                            tell application "iTerm2"
+                                set results to ""
+                                repeat with w in windows
+                                    repeat with t in tabs of w
+                                        repeat with s in sessions of t
+                                            try
+                                                set results to results & (unique ID of s) & "\t" & (tty of s) & "\n"
+                                            end try
+                                        end repeat
                                     end repeat
                                 end repeat
-                            end repeat
-                            return results
-                        end tell
-                        """
+                                return results
+                            end tell
+                            """
                         let task = Process()
                         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
                         task.arguments = ["-e", script]
                         let pipe = Pipe()
                         task.standardOutput = pipe
                         task.standardError = FileHandle.nullDevice
-                        if let _ = try? task.run() {
+                        if (try? task.run()) != nil {
                             task.waitUntilExit()
                             let data = pipe.fileHandleForReading.readDataToEndOfFile()
                             let output = String(data: data, encoding: .utf8) ?? ""
 
-                            // Build set of live GUIDs (those with claude running on their TTY)
                             var liveGuids: Set<String> = []
                             for line in output.split(separator: "\n") {
                                 let cols = line.split(separator: "\t", maxSplits: 1)
                                 guard cols.count == 2 else { continue }
                                 let guid = String(cols[0])
                                 guard guidToSessionId[guid] != nil else { continue }
-                                let ttyName = cols[1].replacingOccurrences(of: "/dev/", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-                                // Check claude is specifically running on this TTY
-                                let check = "ps -t \"\(ttyName)\" -o comm= 2>/dev/null | grep -q claude && echo LIVE"
-                                if let result = self.runShell(check), result.trimmingCharacters(in: .whitespacesAndNewlines) == "LIVE" {
+                                let ttyName = cols[1].replacingOccurrences(of: "/dev/", with: "")
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                let check =
+                                    "ps -t \"\(ttyName)\" -o comm= 2>/dev/null | grep -q claude && echo LIVE"
+                                if let result = self.runShell(check),
+                                    result.trimmingCharacters(in: .whitespacesAndNewlines) == "LIVE"
+                                {
                                     liveGuids.insert(guid)
                                 }
                             }
 
-                            // Any GUID not found live is dead
                             for (guid, sid) in guidToSessionId where !liveGuids.contains(guid) {
                                 deadSessionIds.append(sid)
                             }
@@ -649,25 +967,40 @@ class SessionReader: ObservableObject {
                 }
             }
 
-            // --- No-TTY fallback: prune if stale (>10min) ---
-            for session in noTtySessions where session.isStale {
+            // --- Fallback: no JSONL and no terminal info → use staleness ---
+            for session in noInfoSessions where session.isStale {
                 deadSessionIds.append(session.session_id)
             }
 
-            // Delete dead session files
+            // Delete dead session files (skip team leads with active agents)
             for sid in deadSessionIds {
+                if self.sessionHasActiveTeam(sid) {
+                    NSLog("[ClaudeMonitor] Skipping prune of team lead %@ (has active agents)", sid)
+                    continue
+                }
                 let path = "\(self.sessionsDir)/\(sid).json"
                 try? FileManager.default.removeItem(atPath: path)
                 NSLog("[ClaudeMonitor] Pruned dead session %@", sid)
             }
-
-            // --- Auto-rediscovery ---
-            if shouldRediscover {
-                DispatchQueue.main.async {
-                    self.discoverSessions()
-                }
-            }
         }
+    }
+
+    /// Check if a session is a team lead with active agents (reads team files directly)
+    private func sessionHasActiveTeam(_ sessionId: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let teamsDir = "\(home)/.claude/teams"
+        let fm = FileManager.default
+        guard let teamDirs = try? fm.contentsOfDirectory(atPath: teamsDir) else { return false }
+        for teamDir in teamDirs {
+            let configPath = "\(teamsDir)/\(teamDir)/config.json"
+            guard let data = fm.contents(atPath: configPath),
+                let config = try? JSONDecoder().decode(TeamConfig.self, from: data),
+                config.leadSessionId == sessionId
+            else { continue }
+            let activeCount = (config.members ?? []).filter { $0.isActive ?? false }.count
+            return activeCount > 0
+        }
+        return false
     }
 
     /// Run a shell command and return stdout, or nil on failure
@@ -701,14 +1034,54 @@ class SessionReader: ObservableObject {
                 let session = try JSONDecoder().decode(SessionInfo.self, from: data)
                 loaded.append(session)
             } catch {
-                NSLog("[ClaudeMonitor] Failed to decode %@: %@", file, error.localizedDescription)
+                NSLog(
+                    "[ClaudeMonitor] Deleting corrupt session file %@: %@", file,
+                    error.localizedDescription)
+                try? fm.removeItem(atPath: path)
             }
         }
 
         // Aggregate sessions with the same project name
-        let statusPriority: [String: Int] = ["attention": 0, "working": 1, "done": 2, "starting": 3]
+        let statusPriority: [String: Int] = [
+            "attention": 0, "working": 1, "done": 2, "starting": 3,
+        ]
         var grouped: [String: [SessionInfo]] = [:]
         for s in loaded { grouped[s.project, default: []].append(s) }
+
+        // Merge groups where one session's CWD is ancestor of another's
+        // e.g. "survey" (cwd: .../survey) absorbs "survey-e2e" (cwd: .../survey/apps/survey-e2e)
+        var didMerge = true
+        while didMerge {
+            didMerge = false
+            let keys = Array(grouped.keys)
+            outer: for i in 0..<keys.count {
+                for j in (i + 1)..<keys.count {
+                    let a = keys[i]
+                    let b = keys[j]
+                    let cwdsA = grouped[a]!.map { $0.cwd }
+                    let cwdsB = grouped[b]!.map { $0.cwd }
+                    var aIsParent = false
+                    var bIsParent = false
+                    for cwdA in cwdsA {
+                        for cwdB in cwdsB {
+                            if cwdB.hasPrefix(cwdA + "/") { aIsParent = true }
+                            if cwdA.hasPrefix(cwdB + "/") { bIsParent = true }
+                        }
+                    }
+                    if aIsParent {
+                        grouped[a]!.append(contentsOf: grouped[b]!)
+                        grouped.removeValue(forKey: b)
+                        didMerge = true
+                        break outer
+                    } else if bIsParent {
+                        grouped[b]!.append(contentsOf: grouped[a]!)
+                        grouped.removeValue(forKey: a)
+                        didMerge = true
+                        break outer
+                    }
+                }
+            }
+        }
 
         var aggregated: [SessionInfo] = []
         for (_, group) in grouped {
@@ -726,22 +1099,27 @@ class SessionReader: ObservableObject {
             var merged = best
             // Use first non-empty description
             if merged.last_prompt.isEmpty {
-                merged.last_prompt = group.first(where: { !$0.last_prompt.isEmpty })?.last_prompt ?? ""
+                merged.last_prompt =
+                    group.first(where: { !$0.last_prompt.isEmpty })?.last_prompt ?? ""
             }
             // Use earliest started_at for largest elapsed time
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             var earliest = merged.started_at
-            var earliestDate: Date? = formatter.date(from: earliest) ?? {
-                formatter.formatOptions = [.withInternetDateTime]
-                return formatter.date(from: earliest)
-            }()
+            var earliestDate: Date? =
+                formatter.date(from: earliest)
+                ?? {
+                    formatter.formatOptions = [.withInternetDateTime]
+                    return formatter.date(from: earliest)
+                }()
             for s in group {
                 formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                if let d = formatter.date(from: s.started_at) ?? {
-                    formatter.formatOptions = [.withInternetDateTime]
-                    return formatter.date(from: s.started_at)
-                }() {
+                if let d = formatter.date(from: s.started_at)
+                    ?? {
+                        formatter.formatOptions = [.withInternetDateTime]
+                        return formatter.date(from: s.started_at)
+                    }()
+                {
                     if earliestDate == nil || d < earliestDate! {
                         earliestDate = d
                         earliest = s.started_at
@@ -753,40 +1131,23 @@ class SessionReader: ObservableObject {
         }
 
         // Sort alphabetically by project name for stable ordering
-        aggregated.sort { $0.project.localizedCaseInsensitiveCompare($1.project) == .orderedAscending }
+        aggregated.sort {
+            $0.project.localizedCaseInsensitiveCompare($1.project) == .orderedAscending
+        }
 
         DispatchQueue.main.async {
             self.sessions = aggregated
         }
     }
 
-    func discoverSessions() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", """
-        SESSIONS_DIR="$HOME/.claude/monitor/sessions"
-        NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        for pid in $(ps -eo pid=,comm= | awk '/claude/ && !/claude_monitor/ && !/awk/ {print $1}'); do
-            tty_name=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
-            [ -z "$tty_name" ] || [ "$tty_name" = "??" ] && continue
-            grep -rlq "/dev/$tty_name" "$SESSIONS_DIR" 2>/dev/null && continue
-            cwd=$(lsof -p "$pid" -d cwd -Fn 2>/dev/null | tail -1 | cut -c2-)
-            [ -z "$cwd" ] || [ "$cwd" = "/" ] && continue
-            project=$(basename "$cwd")
-            sid="discovered-${tty_name}"
-            jq -n --arg sid "$sid" --arg project "$project" --arg cwd "$cwd" --arg term_sid "/dev/$tty_name" --arg now "$NOW" '{session_id:$sid,status:"working",project:$project,cwd:$cwd,terminal:"terminal",terminal_session_id:$term_sid,started_at:$now,updated_at:$now,last_prompt:""}' > "$SESSIONS_DIR/$sid.json.tmp" && mv "$SESSIONS_DIR/$sid.json.tmp" "$SESSIONS_DIR/$sid.json"
-        done
-        """]
-        try? task.run()
-        task.waitUntilExit()
-        readSessions()
-    }
 }
 
 // MARK: - Terminal Switcher
 
 func switchToSession(_ session: SessionInfo) {
-    NSLog("[ClaudeMonitor] switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project)")
+    NSLog(
+        "[ClaudeMonitor] switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project)"
+    )
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
     } else if session.terminal == "ghostty" {
@@ -796,6 +1157,15 @@ func switchToSession(_ session: SessionInfo) {
     } else {
         NSLog("[ClaudeMonitor] falling back to cwd switch (no terminal info)")
         switchByTerminalCwd(cwd: session.cwd)
+    }
+
+    // Yield active status so the terminal gets keyboard focus.
+    // The floating panel stays visible but the monitor app deactivates.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        NSApp.hide(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSApp.unhideWithoutActivation()
+        }
     }
 }
 
@@ -812,20 +1182,20 @@ func switchToITerm2(sessionId: String) {
     let uniqueId = String(parts[1])
 
     let script = """
-    tell application "iTerm2"
-        activate
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if unique id of s is "\(uniqueId)" then
-                        select t
-                        return
-                    end if
+        tell application "iTerm2"
+            activate
+            repeat with w in windows
+                repeat with t in tabs of w
+                    repeat with s in sessions of t
+                        if unique id of s is "\(uniqueId)" then
+                            select t
+                            return
+                        end if
+                    end repeat
                 end repeat
             end repeat
-        end repeat
-    end tell
-    """
+        end tell
+        """
 
     if let appleScript = NSAppleScript(source: script) {
         var error: NSDictionary?
@@ -836,19 +1206,19 @@ func switchToITerm2(sessionId: String) {
 func switchToTerminal(ttyPath: String) {
     // Match Terminal.app tab by its tty device path
     let script = """
-    tell application "Terminal"
-        activate
-        repeat with w in windows
-            repeat with t in tabs of w
-                if tty of t is "\(ttyPath)" then
-                    set selected tab of w to t
-                    set index of w to 1
-                    return
-                end if
+        tell application "Terminal"
+            activate
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if tty of t is "\(ttyPath)" then
+                        set selected tab of w to t
+                        set index of w to 1
+                        return
+                    end if
+                end repeat
             end repeat
-        end repeat
-    end tell
-    """
+        end tell
+        """
 
     if let appleScript = NSAppleScript(source: script) {
         var error: NSDictionary?
@@ -860,8 +1230,13 @@ func switchToGhostty(cwd: String) {
     let basename = (cwd as NSString).lastPathComponent
 
     // Find the Ghostty process
-    guard let ghosttyApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first
-          ?? NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Ghostty" }) else {
+    guard
+        let ghosttyApp = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.mitchellh.ghostty"
+        ).first
+            ?? NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Ghostty" }
+            )
+    else {
         return
     }
 
@@ -873,8 +1248,11 @@ func switchToGhostty(cwd: String) {
 
     // Get all windows
     var windowsRef: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-          let windows = windowsRef as? [AXUIElement] else {
+    guard
+        AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
+            == .success,
+        let windows = windowsRef as? [AXUIElement]
+    else {
         ghosttyApp.activate()
         return
     }
@@ -882,8 +1260,11 @@ func switchToGhostty(cwd: String) {
     // Find window whose title contains project basename or cwd
     for window in windows {
         var titleRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef) == .success,
-              let title = titleRef as? String else { continue }
+        guard
+            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+                == .success,
+            let title = titleRef as? String
+        else { continue }
 
         if title.contains(basename) || title.contains(cwd) {
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
@@ -913,18 +1294,18 @@ func killSession(_ session: SessionInfo) {
         if parts.count >= 2 {
             let uniqueId = String(parts[1])
             let script = """
-            tell application "iTerm2"
-                repeat with w in windows
-                    repeat with t in tabs of w
-                        repeat with s in sessions of t
-                            if unique id of s is "\(uniqueId)" then
-                                return tty of s
-                            end if
+                tell application "iTerm2"
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            repeat with s in sessions of t
+                                if unique id of s is "\(uniqueId)" then
+                                    return tty of s
+                                end if
+                            end repeat
                         end repeat
                     end repeat
-                end repeat
-            end tell
-            """
+                end tell
+                """
             if let appleScript = NSAppleScript(source: script) {
                 var error: NSDictionary?
                 let result = appleScript.executeAndReturnError(&error)
@@ -1010,6 +1391,9 @@ struct SessionRowView: View {
                         .font(.system(size: 13, weight: .semibold, design: .default))
                         .foregroundColor(session.isStale ? .gray : .white)
                         .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Spacer(minLength: 4)
 
                     Text(session.status)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -1020,12 +1404,14 @@ struct SessionRowView: View {
                             Capsule()
                                 .fill(session.statusColor.opacity(session.isStale ? 0.08 : 0.2))
                         )
+                        .fixedSize()
 
-                    if let team = teamInfo, team.activeAgentCount > 0 {
+                    let badgeCount = max(teamInfo?.activeAgentCount ?? 0, session.agent_count)
+                    if badgeCount > 0 {
                         HStack(spacing: 3) {
                             Image(systemName: "person.2.fill")
                                 .font(.system(size: 8))
-                            Text("\(team.activeAgentCount)")
+                            Text("\(badgeCount)")
                                 .font(.system(size: 9, weight: .medium, design: .monospaced))
                         }
                         .foregroundColor(.white.opacity(0.5))
@@ -1035,9 +1421,8 @@ struct SessionRowView: View {
                             Capsule()
                                 .fill(Color.white.opacity(0.08))
                         )
+                        .fixedSize()
                     }
-
-                    Spacer()
 
                     if onKill != nil {
                         ZStack {
@@ -1062,6 +1447,7 @@ struct SessionRowView: View {
                     Text(session.elapsedString)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.white.opacity(0.5))
+                        .fixedSize()
                 }
 
                 if !session.last_prompt.isEmpty {
@@ -1097,7 +1483,8 @@ struct SettingsPopover: View {
         VStack(alignment: .leading, spacing: 8) {
             // Refresh sessions
             Button {
-                sessionReader?.discoverSessions()
+                sessionReader?.scanProjects()
+                sessionReader?.readSessions()
                 refreshed = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { refreshed = false }
             } label: {
@@ -1120,9 +1507,12 @@ struct SettingsPopover: View {
                 configManager.toggleVoice()
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: configManager.voiceEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(configManager.voiceEnabled ? .cyan : .gray)
+                    Image(
+                        systemName: configManager.voiceEnabled
+                            ? "speaker.wave.2.fill" : "speaker.slash.fill"
+                    )
+                    .font(.system(size: 10))
+                    .foregroundColor(configManager.voiceEnabled ? .cyan : .gray)
                     Text(configManager.voiceEnabled ? "Voice on" : "Voice off")
                         .font(.system(size: 11))
                         .foregroundColor(configManager.voiceEnabled ? .white : .white.opacity(0.4))
@@ -1163,11 +1553,15 @@ struct SettingsPopover: View {
                                 } label: {
                                     HStack(spacing: 6) {
                                         Circle()
-                                            .fill(isSelected ? Color.cyan : Color.white.opacity(0.15))
+                                            .fill(
+                                                isSelected ? Color.cyan : Color.white.opacity(0.15)
+                                            )
                                             .frame(width: 6, height: 6)
                                         Text(voice.name)
                                             .font(.system(size: 11))
-                                            .foregroundColor(isSelected ? .white : .white.opacity(0.5))
+                                            .foregroundColor(
+                                                isSelected ? .white : .white.opacity(0.5)
+                                            )
                                             .lineLimit(1)
                                         Spacer()
                                     }
@@ -1188,8 +1582,10 @@ struct SettingsPopover: View {
 
                 // Paste voice ID from clipboard
                 Button {
-                    if let pasted = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !pasted.isEmpty {
+                    if let pasted = NSPasteboard.general.string(forType: .string)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                        !pasted.isEmpty
+                    {
                         configManager.setVoice(pasted)
                         pastedVoiceId = String(pasted.prefix(20))
                         // Resolve name and persist to voice list
@@ -1199,7 +1595,9 @@ struct SettingsPopover: View {
                         } else {
                             voiceFetcher.resolveVoiceName(id: voiceId) { name in
                                 DispatchQueue.main.async {
-                                    configManager.addVoice(id: voiceId, name: name ?? "Voice \(String(voiceId.prefix(8)))")
+                                    configManager.addVoice(
+                                        id: voiceId,
+                                        name: name ?? "Voice \(String(voiceId.prefix(8)))")
                                 }
                             }
                         }
@@ -1224,14 +1622,17 @@ struct SettingsPopover: View {
                 }
 
                 // Generate voice from design prompt
-                if let prompt = configManager.config?.elevenlabs.voice_design_prompt, !prompt.isEmpty {
+                if let prompt = configManager.config?.elevenlabs.voice_design_prompt,
+                    !prompt.isEmpty
+                {
                     Divider().background(Color.white.opacity(0.1))
 
                     Button {
                         guard !isGenerating else { return }
                         isGenerating = true
                         generateResult = nil
-                        let voiceName = configManager.config?.elevenlabs.voice_design_name ?? "claude-monitor"
+                        let voiceName =
+                            configManager.config?.elevenlabs.voice_design_name ?? "claude-monitor"
                         voiceFetcher.designVoice(prompt: prompt, name: voiceName) { voiceId, name in
                             DispatchQueue.main.async {
                                 isGenerating = false
@@ -1258,7 +1659,8 @@ struct SettingsPopover: View {
                             }
                             Text(isGenerating ? "Generating..." : "Generate voice")
                                 .font(.system(size: 10))
-                                .foregroundColor(isGenerating ? .purple.opacity(0.4) : .purple.opacity(0.6))
+                                .foregroundColor(
+                                    isGenerating ? .purple.opacity(0.4) : .purple.opacity(0.6))
                             Spacer()
                         }
                     }
@@ -1268,7 +1670,8 @@ struct SettingsPopover: View {
                     if let result = generateResult {
                         Text(result == "failed" ? "Generation failed" : "Created \"\(result)\"")
                             .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(result == "failed" ? .red.opacity(0.6) : .green.opacity(0.6))
+                            .foregroundColor(
+                                result == "failed" ? .red.opacity(0.6) : .green.opacity(0.6))
                     }
                 }
             }
@@ -1278,6 +1681,27 @@ struct SettingsPopover: View {
         .background(
             VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
         )
+    }
+}
+
+struct RefreshButton: View {
+    var sessionReader: SessionReader?
+    @State private var showCheck = false
+
+    var body: some View {
+        Button {
+            sessionReader?.scanProjects()
+            sessionReader?.readSessions()
+            showCheck = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                showCheck = false
+            }
+        } label: {
+            Text(showCheck ? "\u{2713}" : "\u{21BB}")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1334,16 +1758,21 @@ struct HeaderBar: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.white.opacity(0.4))
 
+                RefreshButton(sessionReader: sessionReader)
+
                 Button {
                     showSettings.toggle()
                 } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 8))
-                        .foregroundColor(.white.opacity(0.2))
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.7))
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
                 .popover(isPresented: $showSettings, arrowEdge: .bottom) {
-                    SettingsPopover(configManager: configManager, voiceFetcher: configManager.voiceFetcher, sessionReader: sessionReader)
+                    SettingsPopover(
+                        configManager: configManager, voiceFetcher: configManager.voiceFetcher,
+                        sessionReader: sessionReader)
                 }
             }
         }
@@ -1363,7 +1792,8 @@ struct MonitorContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header — always visible, drag to move
-            HeaderBar(sessions: reader.sessions, configManager: configManager, sessionReader: reader)
+            HeaderBar(
+                sessions: reader.sessions, configManager: configManager, sessionReader: reader)
 
             if isExpanded && !reader.sessions.isEmpty {
                 Divider()
@@ -1380,7 +1810,7 @@ struct MonitorContentView: View {
                                     teamInfo: teamReader.teamsBySession[session.session_id],
                                     onKill: { killSession(session) }
                                 )
-                                    .contentShape(Rectangle())
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             if session.id != reader.sessions.last?.id {
@@ -1411,7 +1841,8 @@ struct MonitorContentView: View {
 // MARK: - Custom Thin Scrollbar
 
 class ThinScroller: NSScroller {
-    override class func scrollerWidth(for controlSize: ControlSize, scrollerStyle: Style) -> CGFloat {
+    override class func scrollerWidth(for controlSize: ControlSize, scrollerStyle: Style) -> CGFloat
+    {
         return 5
     }
 
@@ -1503,7 +1934,8 @@ class FloatingPanel: NSPanel {
 
     func restorePosition() {
         if let x = UserDefaults.standard.object(forKey: "monitorX") as? Double,
-           let y = UserDefaults.standard.object(forKey: "monitorY") as? Double {
+            let y = UserDefaults.standard.object(forKey: "monitorY") as? Double
+        {
             self.setFrameOrigin(NSPoint(x: x, y: y))
         } else if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
@@ -1555,7 +1987,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel = FloatingPanel()
 
         let hostingView = ClickHostingView(
-            rootView: MonitorContentView(reader: reader, teamReader: teamReader, configManager: configManager)
+            rootView: MonitorContentView(
+                reader: reader, teamReader: teamReader, configManager: configManager)
         )
         hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: 40))
         hostingView.wantsLayer = true

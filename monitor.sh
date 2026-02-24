@@ -1,10 +1,10 @@
 #!/bin/bash
 # ~/.claude/hooks/monitor.sh
-# Claude Code lifecycle hook — writes session JSON + triggers TTS
-# Called by hook events: SessionStart, UserPromptSubmit, Stop, PreToolUse, PostToolUse, Notification, SessionEnd
+# Claude Code lifecycle hook — backfills terminal info + handles attention status + TTS
+# Session creation and status (working/done) are handled by the Swift app's JSONL scanner.
 #
 # Usage: monitor.sh [event]
-# Receives hook JSON on stdin (event auto-detected from hook_event_name if arg omitted)
+# Receives hook JSON on stdin
 
 set -euo pipefail
 
@@ -190,38 +190,19 @@ TERM_INFO=$(detect_terminal)
 TERM_APP=$(echo "$TERM_INFO" | cut -d'|' -f1)
 TERM_SID=$(echo "$TERM_INFO" | cut -d'|' -f2)
 
-# Helper: backfill terminal info + update status on existing session file
-update_session() {
-    local new_status="$1"
+# Helper: backfill terminal info on existing session file (preserves all other fields)
+backfill_terminal() {
+    [ -f "$SESSION_FILE" ] || return 0
+    [ -z "$TERM_APP" ] && return 0
     jq \
-        --arg status "$new_status" \
         --arg updated "$NOW" \
         --arg terminal "$TERM_APP" \
         --arg term_sid "$TERM_SID" \
-        '.status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
+        '.updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
         "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
-# Helper: create new session file
-create_session() {
-    local new_status="$1"
-    local prompt="${2:-}"
-    jq -n \
-        --arg sid "$SESSION_ID" \
-        --arg status "$new_status" \
-        --arg project "$PROJECT" \
-        --arg cwd "${CWD:-}" \
-        --arg terminal "$TERM_APP" \
-        --arg term_sid "$TERM_SID" \
-        --arg started "$NOW" \
-        --arg updated "$NOW" \
-        --arg prompt "$prompt" \
-        '{session_id:$sid,status:$status,project:$project,cwd:$cwd,terminal:$terminal,terminal_session_id:$term_sid,started_at:$started,updated_at:$updated,last_prompt:$prompt}' \
-        > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
-}
-
-# --- Handle events ---
-    # Helper: remove stale session files for the same terminal tab (different session_id)
+# Helper: remove stale session files for the same terminal tab (different session_id)
 cleanup_same_terminal() {
     [ -z "$TERM_SID" ] && return
     for f in "$SESSIONS_DIR"/*.json; do
@@ -236,112 +217,72 @@ cleanup_same_terminal() {
     done
 }
 
+# Helper: clear attention/done → working when user/tool activity happens
+clear_attention_if_set() {
+    [ -f "$SESSION_FILE" ] || return 0
+    jq \
+        --arg updated "$NOW" \
+        'if .status == "attention" or .status == "done" then .status = "working" | .updated_at = $updated else . end' \
+        "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+}
+
+# --- Handle events ---
 case "$EVENT" in
     SessionStart)
         SOURCE=$(echo "$INPUT" | jq -r '.source // "startup"')
         case "$SOURCE" in
-            startup)
+            startup|resume)
                 cleanup_same_terminal
-                create_session "starting"
+                backfill_terminal
                 if should_announce start; then
                     announce "$PROJECT_NAME starting" &
-                fi
-                ;;
-            resume)
-                cleanup_same_terminal
-                if [ -f "$SESSION_FILE" ]; then
-                    update_session "starting"
-                else
-                    create_session "starting"
-                fi
-                if should_announce start; then
-                    announce "$PROJECT_NAME starting" &
-                fi
-                ;;
-            *)
-                # Unknown source (e.g. /clear, /compact) — session is idle, mark done
-                if [ -f "$SESSION_FILE" ]; then
-                    update_session "done"
-                else
-                    create_session "done"
                 fi
                 ;;
         esac
         ;;
 
-    UserPromptSubmit)
-        PROMPT_TEXT=$(echo "$INPUT" | jq -r '.prompt // empty' | head -c 200)
-        if [ -f "$SESSION_FILE" ]; then
-            # Single atomic write: status + prompt + terminal backfill
-            jq \
-                --arg status "working" \
-                --arg updated "$NOW" \
-                --arg prompt "$PROMPT_TEXT" \
-                --arg terminal "$TERM_APP" \
-                --arg term_sid "$TERM_SID" \
-                '.status = $status | .updated_at = $updated | .last_prompt = $prompt | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
-                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
-        else
-            create_session "working" "$PROMPT_TEXT"
-        fi
-        ;;
-
     Stop)
         if [ -f "$SESSION_FILE" ]; then
-            update_session "done"
-        else
-            create_session "done"
+            jq \
+                --arg status "done" \
+                --arg updated "$NOW" \
+                '.status = $status | .updated_at = $updated' \
+                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         fi
         if should_announce done; then
             announce "$PROJECT_NAME done" &
         fi
         ;;
 
-    PreToolUse|PostToolUse)
-        # Claude is actively working — PreToolUse fires earliest, PostToolUse
-        # catches the resume after a permission prompt is accepted
-        if [ -f "$SESSION_FILE" ]; then
-            update_session "working"
-        fi
-        ;;
-
     Notification)
         NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
-        # idle_prompt means Claude is waiting for input — that's "done", not "attention"
-        # But don't override "working" or "attention" — those mean a tool is running or
-        # a permission prompt is active. Stop/PostToolUse handle those transitions.
         if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
-            if [ -f "$SESSION_FILE" ]; then
-                CURRENT_STATUS=$(jq -r '.status // "unknown"' "$SESSION_FILE")
-                if [ "$CURRENT_STATUS" = "working" ] || [ "$CURRENT_STATUS" = "attention" ]; then
-                    exit 0
-                fi
-                update_session "done"
-            else
-                create_session "done"
-            fi
+            # idle_prompt means Claude is at the input prompt — announce done
             if should_announce done; then
                 announce "$PROJECT_NAME done" &
             fi
             exit 0
         fi
+        # Non-idle notification = needs attention (permission prompt, etc.)
         if [ -f "$SESSION_FILE" ]; then
-            update_session "attention"
-        else
-            create_session "attention"
+            jq \
+                --arg status "attention" \
+                --arg updated "$NOW" \
+                --arg terminal "$TERM_APP" \
+                --arg term_sid "$TERM_SID" \
+                '.status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
+                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         fi
         if should_announce attention; then
             announce "$PROJECT_NAME needs attention" &
         fi
         ;;
 
-    SessionEnd)
-        # Mark done instead of deleting — /clear fires SessionEnd then SessionStart,
-        # so deleting would make it look like the session closed.
-        # The TTY liveness pruner in the Swift app handles truly dead sessions.
-        if [ -f "$SESSION_FILE" ]; then
-            update_session "done"
-        fi
+    *)
+        # All other events (UserPromptSubmit, PreToolUse, PostToolUse, SessionEnd):
+        # Backfill terminal info and clear attention if set (user/tool activity = no longer blocked)
+        backfill_terminal
+        clear_attention_if_set
         ;;
 esac
 

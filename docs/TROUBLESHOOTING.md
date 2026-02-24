@@ -65,9 +65,9 @@ Check if it's running:
 pgrep -l claude_monitor
 ```
 
-Kill and rebuild:
+Kill and reinstall (run from repo):
 ```bash
-pkill -9 claude_monitor && ~/.claude/monitor/build.sh
+pkill -9 claude_monitor && ./install.sh
 ```
 
 If compilation fails, make sure Xcode Command Line Tools are installed:
@@ -77,11 +77,11 @@ xcode-select --install
 
 ## Panel is in the wrong position
 
-Reset the saved position:
+Reset the saved position (run from repo):
 ```bash
 defaults delete claude_monitor monitorX
 defaults delete claude_monitor monitorY
-pkill claude_monitor && ~/.claude/monitor/build.sh
+pkill claude_monitor && ./install.sh
 ```
 
 It will reappear in the top-right corner.

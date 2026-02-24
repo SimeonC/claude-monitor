@@ -88,68 +88,33 @@ xcode-select --install   # Xcode Command Line Tools (for Swift compiler)
 brew install jq           # JSON processor (used by the hook script)
 ```
 
-#### 2. Create directories
+#### 2. Clone and run install
 
 ```bash
-mkdir -p ~/.claude/monitor/sessions
-mkdir -p ~/.claude/hooks
+git clone <this-repo> && cd osx-claude-code-manager
+./install.sh
 ```
 
-#### 3. Copy files
+The install script is idempotent: it ensures directories exist, creates `config.json` and merges hooks into `~/.claude/settings.json` only when needed, builds and deploys the binary and hook script, installs the LaunchAgent on first run, and restarts the monitor. Use the same command for first-time setup and for updates.
 
-Download the files from this repo and place them:
-
-| File | Install to |
-|------|-----------|
-| `claude_monitor.swift` | `~/.claude/monitor/claude_monitor.swift` |
-| `build.sh` | `~/.claude/monitor/build.sh` |
-| `config.json` | `~/.claude/monitor/config.json` |
-| `monitor.sh` | `~/.claude/hooks/monitor.sh` |
-
-Make the scripts executable:
-
-```bash
-chmod +x ~/.claude/monitor/build.sh ~/.claude/hooks/monitor.sh
-```
-
-#### 4. Configure hooks
-
-Merge the contents of [`hooks.json`](hooks.json) into the `"hooks"` key of your `~/.claude/settings.json`. If you don't have a settings file yet, the update script (step 5) creates one for you.
+The floating panel appears in the top-right corner. Drag to reposition — it remembers where you put it.
 
 <details>
-<summary>Full hooks.json for reference</summary>
+<summary>Hook events (reference)</summary>
 
 The monitor listens for 7 hook events: `SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`, `Notification` (permission_prompt only), and `SessionEnd`. See [`hooks.json`](hooks.json) for the exact configuration.
 
 </details>
 
-#### 5. Compile, configure, and launch
-
-If you cloned the repo, the update script handles everything — copies files, merges hooks into `settings.json`, builds, and restarts:
-
-```bash
-./update.sh
-```
-
-Or build manually:
-
-```bash
-~/.claude/monitor/build.sh
-```
-
-The floating panel appears in the top-right corner. Drag to reposition — it remembers where you put it.
-
 </details>
 
 ### Updating
 
-Run the update script to copy files, update hooks, rebuild, and restart in one step:
+Run the same install script from the repo. It rebuilds, deploys the binary and hook script, merges any new hooks into `settings.json`, and restarts the monitor (without overwriting your `config.json` or reinstalling the LaunchAgent):
 
 ```bash
-./update.sh
+./install.sh
 ```
-
-This copies `claude_monitor.swift`, `build.sh`, and `monitor.sh` to their install locations, merges hook config into `~/.claude/settings.json`, preserves your existing `config.json`, and restarts the monitor.
 
 ### Verify it works
 
@@ -296,8 +261,8 @@ See [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for detailed solutions. Qui
 | Click doesn't switch tabs | Check that `terminal_session_id` is set in the session JSON |
 | No voice | Verify `announce.enabled` is `true` and `volume` > `0` |
 | Wrong voice | Run `say -v '?'` to find the exact voice name, update `say.voice` |
-| Panel gone | `pkill -9 claude_monitor && ~/.claude/monitor/build.sh` |
-| Wrong position | `defaults delete claude_monitor monitorX && defaults delete claude_monitor monitorY` then rebuild |
+| Panel gone | `pkill -9 claude_monitor && ./install.sh` (from repo) |
+| Wrong position | `defaults delete claude_monitor monitorX && defaults delete claude_monitor monitorY` then `./install.sh` |
 
 ## Uninstall
 
@@ -305,23 +270,30 @@ See [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for detailed solutions. Qui
 pkill claude_monitor
 rm -rf ~/.claude/monitor
 rm ~/.claude/hooks/monitor.sh
+# If you used the LaunchAgent:
+launchctl bootout "gui/$(id -u)/com.claude.monitor"
+rm ~/Library/LaunchAgents/com.claude.monitor.plist
 ```
 
 Then remove the 7 hook entries (`SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`, `Notification`, `SessionEnd`) from `~/.claude/settings.json`.
 
 ## File Layout
 
+The repo holds source and the install script; `~/.claude` holds only runtime artifacts (no source or scripts copied there).
+
+**Repo (source of truth):** `claude_monitor.swift`, `install.sh`, `monitor.sh`, `hooks.json`, `config.json`, etc.
+
+**Runtime (`~/.claude/`):**
+
 ```
 ~/.claude/
 ├── monitor/
-│   ├── claude_monitor.swift   # SwiftUI floating panel (~900 lines)
-│   ├── claude_monitor          # Compiled binary (after build)
-│   ├── build.sh               # Compile + launch script
-│   ├── config.json            # TTS + announcement config
-│   └── sessions/              # Session JSON files (auto-managed)
+│   ├── claude_monitor          # Compiled binary (deployed by install.sh)
+│   ├── config.json             # TTS + announcement config (created if missing)
+│   └── sessions/               # Session JSON files (auto-managed)
 ├── hooks/
-│   └── monitor.sh            # Hook script — lifecycle events + TTS
-└── settings.json              # Claude Code settings (hooks go here)
+│   └── monitor.sh              # Hook script (deployed by install.sh)
+└── settings.json               # Claude Code settings (hooks merged by install.sh)
 ```
 
 ## License
