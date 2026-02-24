@@ -508,8 +508,9 @@ struct SessionInfo: Codable, Identifiable {
         switch status {
         case "starting": return .gray
         case "working": return .workingBlue
-        case "done": return .doneGreen
+        case "idle": return .doneGreen
         case "attention": return .orange
+        case "shutting_down": return .gray
         default: return .gray
         }
     }
@@ -518,9 +519,21 @@ struct SessionInfo: Codable, Identifiable {
         switch status {
         case "starting": return "circle.dotted"
         case "working": return "circle.fill"
-        case "done": return "checkmark.circle.fill"
+        case "idle": return "checkmark.circle.fill"
         case "attention": return "exclamationmark.triangle.fill"
+        case "shutting_down": return "arrow.down.circle"
         default: return "circle"
+        }
+    }
+
+    var displayStatus: String {
+        switch status {
+        case "starting": return "starting"
+        case "working": return "working"
+        case "idle": return "idle"
+        case "attention": return "attention"
+        case "shutting_down": return "exiting"
+        default: return status
         }
     }
 
@@ -723,6 +736,8 @@ class SessionReader: ObservableObject {
         guard let data = try? JSONEncoder().encode(session) else { return }
         let tmpPath = path + ".tmp"
         try? data.write(to: URL(fileURLWithPath: tmpPath))
+        // Remove destination first — moveItem fails if it already exists
+        try? FileManager.default.removeItem(atPath: path)
         try? FileManager.default.moveItem(atPath: tmpPath, toPath: path)
     }
 
@@ -793,12 +808,15 @@ class SessionReader: ObservableObject {
                     }
                 }
 
-                // Check existing monitor session file
+                // Update existing session files (don't touch status — hooks own lifecycle).
+                // Create new ones with "starting" for rediscovery after monitor restart.
                 let sessionFile = "\(sessionsDir)/\(sessionId).json"
                 if let data = fm.contents(atPath: sessionFile),
                     let existing = try? JSONDecoder().decode(SessionInfo.self, from: data)
                 {
-                    // Update existing: keep terminal info from hooks
+                    // Don't touch shutting_down sessions — they're waiting to be hidden
+                    if existing.status == "shutting_down" { continue }
+
                     var updated = existing
                     if updated.project == "unknown" || updated.cwd.isEmpty {
                         updated.project = project
@@ -808,18 +826,12 @@ class SessionReader: ObservableObject {
                         updated.last_prompt = lastPrompt
                     }
                     updated.agent_count = agentCount
-
-                    // Active JSONL means session is alive. Set status to "working",
-                    // but preserve "done" — hooks handle done→working on new user activity.
-                    if updated.status != "done" {
-                        updated.status = "working"
-                    }
                     updated.updated_at = nowString
                     writeSessionFile(updated, to: sessionFile)
                 } else {
-                    // Create new session file
+                    // New file — hooks will transition status on next activity
                     let session = SessionInfo(
-                        session_id: sessionId, status: "working",
+                        session_id: sessionId, status: "starting",
                         project: project, cwd: cwd,
                         terminal: "", terminal_session_id: "",
                         started_at: lastTimestamp ?? nowString,
@@ -865,14 +877,14 @@ class SessionReader: ObservableObject {
                     let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath),
                     let mtime = attrs[.modificationDate] as? Date
                 {
+                    // Prune any session whose JSONL is older than 12 hours
                     let age = Date().timeIntervalSince(mtime)
-                    // "done" sessions linger until isStale (10 min) so user can see them;
-                    // active sessions are pruned after 2 min of no JSONL writes.
-                    let threshold: TimeInterval = session.status == "done" ? 600 : 120
-                    if age > threshold {
+                    if age > 43200 {
                         deadSessionIds.append(session.session_id)
                     }
-                    continue  // JSONL check is authoritative, skip TTY fallback
+                    // Otherwise keep the file — shutting_down sessions are hidden from UI
+                    // but kept on disk so session resumption can "reboot" them.
+                    continue
                 }
 
                 // No JSONL found — use terminal-based fallback
@@ -1026,12 +1038,23 @@ class SessionReader: ObservableObject {
             return
         }
 
+        let isoFmt = ISO8601DateFormatter()
         var loaded: [SessionInfo] = []
         for file in files where file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
             guard let data = fm.contents(atPath: path) else { continue }
             do {
                 let session = try JSONDecoder().decode(SessionInfo.self, from: data)
+                // Hide shutting_down sessions after 30s (file stays for potential resume)
+                if session.status == "shutting_down" {
+                    isoFmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                    var updDate = isoFmt.date(from: session.updated_at)
+                    if updDate == nil {
+                        isoFmt.formatOptions = [.withInternetDateTime]
+                        updDate = isoFmt.date(from: session.updated_at)
+                    }
+                    if let d = updDate, Date().timeIntervalSince(d) > 30 { continue }
+                }
                 loaded.append(session)
             } catch {
                 NSLog(
@@ -1043,7 +1066,7 @@ class SessionReader: ObservableObject {
 
         // Aggregate sessions with the same project name
         let statusPriority: [String: Int] = [
-            "attention": 0, "working": 1, "done": 2, "starting": 3,
+            "attention": 0, "working": 1, "idle": 2, "shutting_down": 3, "starting": 4,
         ]
         var grouped: [String: [SessionInfo]] = [:]
         for s in loaded { grouped[s.project, default: []].append(s) }
@@ -1392,18 +1415,13 @@ struct SessionRowView: View {
                         .foregroundColor(session.isStale ? .gray : .white)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        .layoutPriority(1)
 
                     Spacer(minLength: 4)
 
-                    Text(session.status)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(session.statusColor.opacity(session.isStale ? 0.6 : 1.0))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(session.statusColor.opacity(session.isStale ? 0.08 : 0.2))
-                        )
+                    Text(session.elapsedString)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.5))
                         .fixedSize()
 
                     let badgeCount = max(teamInfo?.activeAgentCount ?? 0, session.agent_count)
@@ -1444,9 +1462,15 @@ struct SessionRowView: View {
                         .frame(width: 28, height: 28)
                     }
 
-                    Text(session.elapsedString)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.5))
+                    Text(session.displayStatus)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(session.statusColor.opacity(session.isStale ? 0.6 : 1.0))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(session.statusColor.opacity(session.isStale ? 0.08 : 0.2))
+                        )
                         .fixedSize()
                 }
 
@@ -1713,7 +1737,7 @@ struct HeaderBar: View {
 
     var attentionCount: Int { sessions.filter { $0.status == "attention" }.count }
     var workingCount: Int { sessions.filter { $0.status == "working" }.count }
-    var doneCount: Int { sessions.filter { $0.status == "done" }.count }
+    var idleCount: Int { sessions.filter { $0.status == "idle" }.count }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1745,10 +1769,10 @@ struct HeaderBar: View {
                             .foregroundColor(.workingBlue)
                     }
                 }
-                if doneCount > 0 {
+                if idleCount > 0 {
                     HStack(spacing: 3) {
                         Circle().fill(Color.doneGreen).frame(width: 6, height: 6)
-                        Text("\(doneCount)")
+                        Text("\(idleCount)")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.doneGreen)
                     }

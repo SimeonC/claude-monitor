@@ -16,8 +16,6 @@ EVENT="${1:-$(echo "$INPUT" | jq -r '.hook_event_name // "unknown"')}"
 # --- Paths ---
 MONITOR_DIR="$HOME/.claude/monitor"
 SESSIONS_DIR="$MONITOR_DIR/sessions"
-CONFIG_FILE="$MONITOR_DIR/config.json"
-
 mkdir -p "$SESSIONS_DIR"
 
 # --- Extract context from hook JSON ---
@@ -92,99 +90,6 @@ detect_terminal() {
     echo "$term_app|$term_session_id"
 }
 
-# --- TTS announcement ---
-announce() {
-    local msg="$1"
-    local provider voice rate
-
-    # Read config
-    if [ ! -f "$CONFIG_FILE" ]; then
-        return
-    fi
-
-    provider=$(jq -r '.tts_provider // "say"' "$CONFIG_FILE")
-    local volume
-    volume=$(jq -r '.announce.volume // 0.5' "$CONFIG_FILE")
-
-    if [ "$provider" = "elevenlabs" ]; then
-        local env_file model stability similarity
-        env_file=$(jq -r '.elevenlabs.env_file // empty' "$CONFIG_FILE")
-        env_file="${env_file/#\~/$HOME}"
-        model=$(jq -r '.elevenlabs.model // "eleven_multilingual_v2"' "$CONFIG_FILE")
-        stability=$(jq -r '.elevenlabs.stability // 0.5' "$CONFIG_FILE")
-        similarity=$(jq -r '.elevenlabs.similarity_boost // 0.75' "$CONFIG_FILE")
-
-        if [ -f "$env_file" ]; then
-            set -a; source "$env_file"; set +a
-        fi
-
-        local config_voice_id
-        config_voice_id=$(jq -r '.elevenlabs.voice_id // empty' "$CONFIG_FILE")
-        if [ -n "$config_voice_id" ]; then
-            ELEVENLABS_VOICE_ID="$config_voice_id"
-        fi
-
-        if [ -n "${ELEVENLABS_API_KEY:-}" ] && [ -n "${ELEVENLABS_VOICE_ID:-}" ]; then
-            local temp_audio="/tmp/claude_monitor_tts_$$.mp3"
-            local json_payload
-            json_payload=$(python3 -c "
-import json, sys
-print(json.dumps({
-    'text': sys.argv[1],
-    'model_id': sys.argv[2],
-    'voice_settings': {'stability': float(sys.argv[3]), 'similarity_boost': float(sys.argv[4])}
-}))
-" "$msg" "$model" "$stability" "$similarity")
-
-            local http_code
-            http_code=$(curl -s -w '%{http_code}' -X POST \
-                "https://api.elevenlabs.io/v1/text-to-speech/$ELEVENLABS_VOICE_ID" \
-                -H "xi-api-key: $ELEVENLABS_API_KEY" \
-                -H "Content-Type: application/json" \
-                -d "$json_payload" \
-                -o "$temp_audio")
-
-            if [ "$http_code" = "200" ] && [ -s "$temp_audio" ]; then
-                afplay -v "$volume" "$temp_audio" &
-                disown 2>/dev/null
-                (sleep 30 && rm -f "$temp_audio") &
-                disown 2>/dev/null
-            else
-                rm -f "$temp_audio"
-                say -v "Samantha" -r 200 "$msg" &
-                disown 2>/dev/null
-            fi
-        else
-            say -v "Samantha" -r 200 "$msg" &
-            disown 2>/dev/null
-        fi
-    else
-        voice=$(jq -r '.say.voice // "Samantha"' "$CONFIG_FILE")
-        rate=$(jq -r '.say.rate // 200' "$CONFIG_FILE")
-        # osascript say supports volume 0.0-1.0
-        osascript -e "say \"${msg}\" using \"${voice}\" speaking rate ${rate} volume ${volume}" &
-        disown 2>/dev/null
-    fi
-}
-
-# --- Should we announce this event? ---
-should_announce() {
-    local event_type="$1"
-    if [ ! -f "$CONFIG_FILE" ]; then
-        return 1
-    fi
-
-    # Master toggle
-    jq -e '.announce.enabled == true' "$CONFIG_FILE" >/dev/null 2>&1 || return 1
-
-    case "$event_type" in
-        done)     jq -e '.announce.on_done == true' "$CONFIG_FILE" >/dev/null 2>&1 ;;
-        attention) jq -e '.announce.on_attention == true' "$CONFIG_FILE" >/dev/null 2>&1 ;;
-        start)    jq -e '.announce.on_start == true' "$CONFIG_FILE" >/dev/null 2>&1 ;;
-        *)        return 1 ;;
-    esac
-}
-
 # --- Detect terminal once for all events ---
 TERM_INFO=$(detect_terminal)
 TERM_APP=$(echo "$TERM_INFO" | cut -d'|' -f1)
@@ -217,49 +122,65 @@ cleanup_same_terminal() {
     done
 }
 
-# Helper: clear attention/done → working when user/tool activity happens
-clear_attention_if_set() {
+# Helper: any non-working status → working when user/tool activity happens
+set_working() {
     [ -f "$SESSION_FILE" ] || return 0
     jq \
         --arg updated "$NOW" \
-        'if .status == "attention" or .status == "done" then .status = "working" | .updated_at = $updated else . end' \
+        'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
         "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
 # --- Handle events ---
 case "$EVENT" in
     SessionStart)
-        SOURCE=$(echo "$INPUT" | jq -r '.source // "startup"')
-        case "$SOURCE" in
-            startup|resume)
-                cleanup_same_terminal
-                backfill_terminal
-                if should_announce start; then
-                    announce "$PROJECT_NAME starting" &
-                fi
-                ;;
-        esac
+        cleanup_same_terminal
+        if [ -f "$SESSION_FILE" ]; then
+            # Session file exists — backfill terminal and reboot if shutting_down
+            backfill_terminal
+            CURRENT_STATUS=$(jq -r '.status // ""' "$SESSION_FILE")
+            if [ "$CURRENT_STATUS" = "shutting_down" ]; then
+                jq \
+                    --arg status "starting" \
+                    --arg updated "$NOW" \
+                    '.status = $status | .updated_at = $updated' \
+                    "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+            fi
+        else
+            # New session — create file with "starting" status
+            jq -n \
+                --arg sid "$SESSION_ID" \
+                --arg status "starting" \
+                --arg project "$PROJECT" \
+                --arg cwd "${CWD:-}" \
+                --arg terminal "$TERM_APP" \
+                --arg term_sid "$TERM_SID" \
+                --arg now "$NOW" \
+                '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0}' \
+                > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+        fi
         ;;
 
     Stop)
         if [ -f "$SESSION_FILE" ]; then
             jq \
-                --arg status "done" \
+                --arg status "idle" \
                 --arg updated "$NOW" \
                 '.status = $status | .updated_at = $updated' \
                 "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
-        fi
-        if should_announce done; then
-            announce "$PROJECT_NAME done" &
         fi
         ;;
 
     Notification)
         NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
         if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
-            # idle_prompt means Claude is at the input prompt — announce done
-            if should_announce done; then
-                announce "$PROJECT_NAME done" &
+            # idle_prompt means Claude is at the input prompt — set idle
+            if [ -f "$SESSION_FILE" ]; then
+                jq \
+                    --arg status "idle" \
+                    --arg updated "$NOW" \
+                    '.status = $status | .updated_at = $updated' \
+                    "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
             fi
             exit 0
         fi
@@ -273,16 +194,25 @@ case "$EVENT" in
                 '.status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
                 "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         fi
-        if should_announce attention; then
-            announce "$PROJECT_NAME needs attention" &
+        ;;
+
+    SessionEnd)
+        # Session is shutting down — backfill terminal info and mark as shutting_down
+        backfill_terminal
+        if [ -f "$SESSION_FILE" ]; then
+            jq \
+                --arg status "shutting_down" \
+                --arg updated "$NOW" \
+                '.status = $status | .updated_at = $updated' \
+                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         fi
         ;;
 
     *)
-        # All other events (UserPromptSubmit, PreToolUse, PostToolUse, SessionEnd):
-        # Backfill terminal info and clear attention if set (user/tool activity = no longer blocked)
+        # All other events (UserPromptSubmit, PreToolUse, PostToolUse):
+        # Backfill terminal info and set working (user/tool activity = actively processing)
         backfill_terminal
-        clear_attention_if_set
+        set_working
         ;;
 esac
 
