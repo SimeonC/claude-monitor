@@ -457,6 +457,7 @@ class SessionReader: ObservableObject {
     private var timer: Timer?
     private var livenessTimer: Timer?
     private var dirSource: DispatchSourceFileSystemObject?
+    private var livenessTickCount = 0
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -464,6 +465,7 @@ class SessionReader: ObservableObject {
     }()
 
     init() {
+        prunePreBootSessions()
         readSessions()
 
         // FSEvents: instant reload when session files change
@@ -491,54 +493,197 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Remove session files whose TTY no longer has any processes (terminal tab closed)
+    /// Delete session files last updated before the most recent boot (survived an ungraceful shutdown)
+    private func prunePreBootSessions() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
+        task.arguments = ["-n", "kern.boottime"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch { return }
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        // Format: "{ sec = 1234567890, usec = 123456 } ..."
+        guard let secRange = output.range(of: "sec = "),
+              let secEnd = output[secRange.upperBound...].firstIndex(of: ","),
+              let bootEpoch = TimeInterval(output[secRange.upperBound..<secEnd].trimmingCharacters(in: .whitespaces))
+        else { return }
+        let bootTime = Date(timeIntervalSince1970: bootEpoch)
+
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
+        let isoFormatter = ISO8601DateFormatter()
+
+        for file in files where file.hasSuffix(".json") {
+            let path = "\(sessionsDir)/\(file)"
+            guard let data = fm.contents(atPath: path),
+                  let session = try? JSONDecoder().decode(SessionInfo.self, from: data)
+            else { continue }
+
+            isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            var updated = isoFormatter.date(from: session.updated_at)
+            if updated == nil {
+                isoFormatter.formatOptions = [.withInternetDateTime]
+                updated = isoFormatter.date(from: session.updated_at)
+            }
+            if let updated = updated, updated < bootTime {
+                try? fm.removeItem(atPath: path)
+                NSLog("[ClaudeMonitor] Pruned pre-boot session %@ (updated %@)", session.session_id, session.updated_at)
+            }
+        }
+    }
+
+    /// Remove session files whose `claude` process is no longer running
     func pruneDeadSessions() {
         let currentSessions = sessions
         guard !currentSessions.isEmpty else { return }
 
-        // Build map: ttyName -> [session_id]
-        var ttyMap: [String: [String]] = [:]
+        // Separate sessions by terminal type
+        var ttyMap: [String: [String]] = [:]       // ttyName -> [session_id]
+        var itermSessions: [(id: String, termSid: String)] = []
+        var noTtySessions: [SessionInfo] = []
+
         for session in currentSessions {
-            guard !session.terminal_session_id.isEmpty else { continue }
-            if session.terminal == "terminal" || session.terminal == "ghostty" {
+            if session.terminal_session_id.isEmpty {
+                noTtySessions.append(session)
+                continue
+            }
+            if session.terminal == "iterm2" {
+                itermSessions.append((session.session_id, session.terminal_session_id))
+            } else {
+                // Terminal.app, Ghostty — terminal_session_id is the TTY
                 let ttyName = session.terminal_session_id.replacingOccurrences(of: "/dev/", with: "")
                 ttyMap[ttyName, default: []].append(session.session_id)
             }
         }
-        guard !ttyMap.isEmpty else { return }
+
+        // Auto-rediscovery: every 3rd tick (~15s), scan for claude processes with no session file
+        livenessTickCount += 1
+        let shouldRediscover = (livenessTickCount % 3 == 0)
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
+            var deadSessionIds: [String] = []
 
-            // Single shell command checks all TTYs at once
-            let ttys = ttyMap.keys.joined(separator: " ")
-            let script = "for tty in \(ttys); do ps -t \"$tty\" -o pid= 2>/dev/null | head -1 | grep -q . || echo \"$tty\"; done"
+            // --- Terminal/Ghostty: check for `claude` on each TTY ---
+            if !ttyMap.isEmpty {
+                let ttys = ttyMap.keys.joined(separator: " ")
+                // Check specifically for claude process, not just any process on the TTY
+                let script = "for tty in \(ttys); do ps -t \"$tty\" -o comm= 2>/dev/null | grep -q claude || echo \"$tty\"; done"
+                if let output = self.runShell(script) {
+                    for tty in output.split(separator: "\n").map(String.init) {
+                        if let sids = ttyMap[tty] { deadSessionIds.append(contentsOf: sids) }
+                    }
+                }
+            }
 
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/bin/sh")
-            task.arguments = ["-c", script]
-            let pipe = Pipe()
-            task.standardOutput = pipe
-            task.standardError = FileHandle.nullDevice
+            // --- iTerm2: resolve TTYs via batched AppleScript ---
+            if !itermSessions.isEmpty {
+                let itermRunning = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.googlecode.iterm2" }
+                if !itermRunning {
+                    // iTerm2 not running — all iTerm sessions are dead
+                    deadSessionIds.append(contentsOf: itermSessions.map(\.id))
+                } else {
+                    // terminal_session_id format: "w0t0p0:GUID" — extract GUIDs to look up
+                    var guidToSessionId: [String: String] = [:]
+                    for s in itermSessions {
+                        let parts = s.termSid.split(separator: ":")
+                        if parts.count >= 2 {
+                            guidToSessionId[String(parts[1])] = s.id
+                        }
+                    }
 
-            do {
-                try task.run()
-                task.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                let deadTTYs = Set(output.split(separator: "\n").map(String.init))
+                    if !guidToSessionId.isEmpty {
+                        // Single AppleScript: collect "GUID<tab>TTY" for every open session
+                        let script = """
+                        tell application "iTerm2"
+                            set results to ""
+                            repeat with w in windows
+                                repeat with t in tabs of w
+                                    repeat with s in sessions of t
+                                        try
+                                            set results to results & (unique ID of s) & "\t" & (tty of s) & "\n"
+                                        end try
+                                    end repeat
+                                end repeat
+                            end repeat
+                            return results
+                        end tell
+                        """
+                        let task = Process()
+                        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                        task.arguments = ["-e", script]
+                        let pipe = Pipe()
+                        task.standardOutput = pipe
+                        task.standardError = FileHandle.nullDevice
+                        if let _ = try? task.run() {
+                            task.waitUntilExit()
+                            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                            let output = String(data: data, encoding: .utf8) ?? ""
 
-                for tty in deadTTYs {
-                    if let sids = ttyMap[tty] {
-                        for sid in sids {
-                            let path = "\(self.sessionsDir)/\(sid).json"
-                            try? FileManager.default.removeItem(atPath: path)
-                            NSLog("[ClaudeMonitor] Pruned session %@ — TTY %@ gone", sid, tty)
+                            // Build set of live GUIDs (those with claude running on their TTY)
+                            var liveGuids: Set<String> = []
+                            for line in output.split(separator: "\n") {
+                                let cols = line.split(separator: "\t", maxSplits: 1)
+                                guard cols.count == 2 else { continue }
+                                let guid = String(cols[0])
+                                guard guidToSessionId[guid] != nil else { continue }
+                                let ttyName = cols[1].replacingOccurrences(of: "/dev/", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                // Check claude is specifically running on this TTY
+                                let check = "ps -t \"\(ttyName)\" -o comm= 2>/dev/null | grep -q claude && echo LIVE"
+                                if let result = self.runShell(check), result.trimmingCharacters(in: .whitespacesAndNewlines) == "LIVE" {
+                                    liveGuids.insert(guid)
+                                }
+                            }
+
+                            // Any GUID not found live is dead
+                            for (guid, sid) in guidToSessionId where !liveGuids.contains(guid) {
+                                deadSessionIds.append(sid)
+                            }
                         }
                     }
                 }
-            } catch {}
+            }
+
+            // --- No-TTY fallback: prune if stale (>10min) ---
+            for session in noTtySessions where session.isStale {
+                deadSessionIds.append(session.session_id)
+            }
+
+            // Delete dead session files
+            for sid in deadSessionIds {
+                let path = "\(self.sessionsDir)/\(sid).json"
+                try? FileManager.default.removeItem(atPath: path)
+                NSLog("[ClaudeMonitor] Pruned dead session %@", sid)
+            }
+
+            // --- Auto-rediscovery ---
+            if shouldRediscover {
+                DispatchQueue.main.async {
+                    self.discoverSessions()
+                }
+            }
         }
+    }
+
+    /// Run a shell command and return stdout, or nil on failure
+    private func runShell(_ script: String) -> String? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", script]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)
+        } catch { return nil }
     }
 
     func readSessions() {
@@ -571,8 +716,13 @@ class SessionReader: ObservableObject {
                 aggregated.append(group[0])
                 continue
             }
-            // Pick representative: highest-priority status
-            let best = group.min { (statusPriority[$0.status] ?? 9) < (statusPriority[$1.status] ?? 9) }!
+            // Pick representative: highest-priority status, then most recently updated
+            let best = group.min { a, b in
+                let pa = statusPriority[a.status] ?? 9
+                let pb = statusPriority[b.status] ?? 9
+                if pa != pb { return pa < pb }
+                return a.updated_at > b.updated_at  // ISO8601 sorts lexicographically
+            }!
             var merged = best
             // Use first non-empty description
             if merged.last_prompt.isEmpty {
