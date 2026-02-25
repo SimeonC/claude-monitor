@@ -47,16 +47,17 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - Per-event toggles and volume in `config.json`
 
 **See everything**
-- Live status for every session: starting, working, done, or needs attention
+- Live status for every session: starting, working, idle, or needs attention
 - Project name, elapsed time, and last prompt preview
-- Color-coded status dots (pulsing cyan = working, orange = attention, green = done)
+- Team agent badges when sessions spawn sub-agents
+- Color-coded status dots (pulsing cyan = working, orange = attention, green = idle)
 - Stale sessions automatically gray out after 10 minutes
 
 **Stay in flow**
-- Click any row to jump to that terminal tab instantly (Terminal.app + iTerm2)
+- Click any row to jump to that terminal tab instantly (Ghostty, iTerm2, Terminal.app)
 - Kill any session with one click (hover to reveal the X)
-- Dead sessions auto-removed when the terminal tab closes
-- Discover missing sessions with the refresh button
+- Dead sessions marked inactive on disk (never deleted, prevents concurrent hook errors)
+- Sessions auto-discovered via JSONL scanning — no manual refresh needed
 
 **Designed to disappear**
 - Always-on-top dark glass panel, visible on all Spaces
@@ -102,7 +103,7 @@ The floating panel appears in the top-right corner. Drag to reposition — it re
 <details>
 <summary>Hook events (reference)</summary>
 
-The monitor listens for 7 hook events: `SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`, `Notification` (permission_prompt only), and `SessionEnd`. See [`hooks.json`](hooks.json) for the exact configuration.
+The monitor listens for 7 hook events: `SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`, `Notification` (permission_prompt + idle_prompt), and `SessionEnd`. See [`hooks.json`](hooks.json) for the exact configuration.
 
 </details>
 
@@ -189,7 +190,7 @@ The included voice design prompt creates a warm, softly synthetic voice — like
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the CLI tool from Anthropic
 - **Xcode Command Line Tools** — `xcode-select --install` (for the Swift compiler)
 - **jq** — `brew install jq` (for JSON processing in the hook script)
-- **Terminal.app or iTerm2**
+- **Ghostty, iTerm2, or Terminal.app**
 - (Optional) [ElevenLabs](https://elevenlabs.io) API key for AI voices
 
 ## How It Works
@@ -201,15 +202,17 @@ Claude Code hook fires
 monitor.sh writes session JSON to ~/.claude/monitor/sessions/{id}.json
         |
         v
-Swift app polls directory every 500ms, picks up changes
+Swift app detects changes via FSEvents, reads updated session files
         |
         v
 Floating panel updates: status dot, project name, prompt preview, elapsed time
         |
         v
-Click row → AppleScript activates the right Terminal/iTerm2 tab
+Click row → switches to the right Ghostty/iTerm2/Terminal.app window
 TTS → announces "project done" or "project needs attention"
 ```
+
+Session files are **never deleted** — status transitions replace destructive removal to prevent `jq` race conditions in concurrent hooks. The Swift app also scans `~/.claude/projects/` JSONL files to auto-discover sessions that weren't created by hooks.
 
 Each Claude Code lifecycle event maps to a session status:
 
@@ -217,10 +220,10 @@ Each Claude Code lifecycle event maps to a session status:
 |-------|--------|-------|
 | Session starts | `starting` | Optional (off by default) |
 | You send a prompt | `working` | No |
-| Claude finishes | `done` | Yes |
+| Claude finishes / idle prompt | `idle` | Yes (on finish) |
 | Claude needs permission | `attention` | Yes |
-| You exit Claude Code | Removed after 5s | No |
-| Terminal tab closed | Auto-removed | No |
+| You exit Claude Code | `shutting_down` → `dead` | No |
+| Process no longer running | `dead` (file stays on disk) | No |
 
 See [Architecture](docs/ARCHITECTURE.md) for the full technical deep-dive.
 

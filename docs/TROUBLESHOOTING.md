@@ -88,12 +88,14 @@ It will reappear in the top-right corner.
 
 ## Sessions stay after Claude Code exits
 
-Normally, the `SessionEnd` hook removes the session file after 5 seconds. If sessions persist:
+The `SessionEnd` hook sets the session to `shutting_down`, and the liveness checker eventually marks it `dead`. Dead sessions are hidden from the UI but the file stays on disk (to prevent race conditions with concurrent hooks).
 
-- The terminal tab might still be open (the liveness check only prunes when the TTY is gone)
+If a session persists in the UI:
+
 - The `SessionEnd` hook might not have fired (crash, SIGKILL)
+- The liveness checker runs every ~30 seconds — wait a moment
 
-**Fix:** Close the terminal tab (the liveness check will clean it up within 5 seconds), or click the X button on the session row.
+**Fix:** Click the X button on the session row to immediately mark it dead.
 
 ## Build warnings
 

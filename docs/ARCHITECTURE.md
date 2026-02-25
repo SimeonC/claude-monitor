@@ -11,18 +11,17 @@ Claude Monitor is two components: a **bash hook script** that captures session l
 │  monitor.sh (hook)  │ ──────────────────── │  claude_monitor    │
 │                     │   ~/.claude/monitor  │  (SwiftUI app)     │
 │  - Runs on every    │   /sessions/{id}.json│                    │
-│    Claude Code event│                      │  - Polls every     │
-│  - Writes session   │                      │    500ms           │
-│    JSON             │                      │  - Floating panel  │
-│  - Triggers TTS     │                      │  - Click to switch │
+│    Claude Code event│                      │  - FSEvents watcher│
+│  - Writes session   │                      │  - Floating panel  │
+│    JSON             │                      │  - Click to switch │
 └─────────────────────┘                      └────────────────────┘
 ```
 
-The two components communicate through the filesystem — no sockets, no IPC, no daemon. The hook writes JSON files; the app reads them.
+The two components communicate through the filesystem — no sockets, no IPC, no daemon. The hook writes JSON files; the app detects changes via FSEvents.
 
 ## Hook Script (`monitor.sh`)
 
-Handles all 5 Claude Code lifecycle events:
+Handles all 7 Claude Code lifecycle events:
 
 ```bash
 monitor.sh <event>   # receives hook JSON on stdin
@@ -30,10 +29,23 @@ monitor.sh <event>   # receives hook JSON on stdin
 
 ### Event Flow
 
-1. **Parse input** — reads JSON from stdin, extracts `session_id` and `cwd`
-2. **Detect terminal** — walks the process tree to find the parent shell's TTY
-3. **Write session file** — creates or updates `~/.claude/monitor/sessions/{id}.json`
-4. **Announce** — optionally speaks status via macOS `say` or ElevenLabs API
+1. **Sub-agent detection** — walks the process tree looking for two `claude` ancestors; if found, this is a sub-agent hook and exits early
+2. **Parse input** — reads JSON from stdin, extracts `session_id` and `cwd`
+3. **Detect terminal** — identifies Ghostty (`GHOSTTY_RESOURCES_DIR`), iTerm2 (`ITERM_SESSION_ID`), or Terminal.app (TTY from process tree)
+4. **Write session file** — creates or updates `~/.claude/monitor/sessions/{id}.json`
+
+### Event → Status Mapping
+
+| Event | Action |
+|-------|--------|
+| `SessionStart` | Create session file with `starting` status; reboot `dead`/`shutting_down` → `starting` for `--continue` |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | Set `working` (unless `dead`) |
+| `Stop` | Set `idle` (unless `dead`) |
+| `Notification` (idle_prompt) | Set `idle` (unless `dead`) |
+| `Notification` (permission_prompt) | Set `attention` (unless `dead`) |
+| `SessionEnd` | Set `shutting_down` |
+
+Dead sessions are never revived by non-start events — guards in every handler check for `status == "dead"` and skip the update.
 
 ### Terminal Detection
 
@@ -41,12 +53,19 @@ Hook subprocesses can't use the `tty` command (stdin is piped). Instead, the scr
 
 ```
 Hook process (stdin = pipe, no tty)
-  └── parent shell (bash/zsh)
+  └── parent shell (bash/zsh/fish)
        └── Claude Code process
             └── shell on TTY ← found: /dev/ttys018
 ```
 
-For iTerm2, the `ITERM_SESSION_ID` environment variable is used directly (set by iTerm2 on session creation).
+For iTerm2, the `ITERM_SESSION_ID` environment variable is used directly. For Ghostty, `GHOSTTY_RESOURCES_DIR` identifies the terminal, and the TTY path is stored for liveness checks.
+
+### Non-Destructive Session Management
+
+Session `.json` files are **never deleted**. All cleanup operations set `status = "dead"` instead of removing the file. This prevents `jq` errors when concurrent hooks try to read a file that was just deleted by another hook.
+
+- `cleanup_same_terminal()` — marks stale sessions for the same terminal tab as `dead`
+- `SessionStart` on a `dead` session — reboots it to `starting` (supports `--continue`)
 
 ### Atomic Writes
 
@@ -56,15 +75,6 @@ All file operations use the tmp-and-rename pattern to prevent the SwiftUI app fr
 jq '...' > "${file}.tmp" && mv "${file}.tmp" "$file"
 ```
 
-### TTS Integration
-
-Two providers, same interface:
-
-- **macOS `say`** — uses `osascript` for volume control: `say "text" using "voice" speaking rate N volume V`
-- **ElevenLabs** — `curl` POST to `/v1/text-to-speech/{voice_id}`, plays response with `afplay -v`
-
-Both run in the background (`&` + `disown`) to avoid blocking the hook.
-
 ## SwiftUI App (`claude_monitor.swift`)
 
 Single-file SwiftUI app, compiled to a standalone binary.
@@ -73,7 +83,9 @@ Single-file SwiftUI app, compiled to a standalone binary.
 
 | Class | Role |
 |-------|------|
-| `SessionReader` | Polls `sessions/` directory every 500ms, decodes JSON, sorts by priority |
+| `SessionReader` | Watches `sessions/` via FSEvents, decodes JSON, aggregates by project, scans JSONL files for auto-discovery |
+| `TeamReader` | Watches `~/.claude/teams/` and `~/.claude/tasks/` for team agent activity |
+| `DirectoryWatcher` | Generic FSEvents wrapper for low-latency file change detection |
 | `ConfigManager` | Reads/writes `config.json`, manages voice selection |
 | `VoiceFetcher` | Fetches ElevenLabs voice library via API |
 | `FloatingPanel` | `NSPanel` subclass — borderless, always-on-top, non-activating |
@@ -105,14 +117,25 @@ Bottom edge (moves down) ────────
 
 ### Session Lifecycle Management
 
-**Liveness check**: Every 5 seconds, the app checks if each session's TTY still has processes running. If the terminal tab was closed (no processes on TTY), the session file is removed automatically.
+**FSEvents watchers**: The app uses FSEvents (not polling) to detect changes to session files, JSONL files, and team config files. Changes trigger an immediate re-read.
 
-**Discovery**: The refresh button in settings scans for running `claude` processes, finds their TTYs and working directories, and creates session files for any that aren't tracked.
+**JSONL scanning**: The primary session discovery mechanism. Scans `~/.claude/projects/` for recently-modified `.jsonl` files, extracts CWD and last prompt, and creates/updates session files. This catches sessions that hooks missed (e.g., sessions started before hooks were installed).
+
+**Liveness check**: A periodic timer (every 30s) checks whether each session's `claude` process is still running:
+1. **Primary**: Check JSONL file mtime — if older than 12 hours, mark dead
+2. **Fallback (Terminal/Ghostty)**: Check if `claude` is running on the session's TTY
+3. **Fallback (iTerm2)**: AppleScript queries iTerm2 for the session's TTY, then checks for claude
+4. **Fallback (no info)**: Mark stale sessions without terminal info or JSONL as dead
+
+Dead sessions are marked `status = "dead"` (file stays on disk). Team leads with active agents are protected from pruning.
+
+**Boot cleanup**: On startup, sessions with `updated_at` before the app's boot time are marked dead (leftover from a previous crash).
 
 ### Terminal Tab Switching
 
-Two strategies based on terminal type:
+Three strategies based on terminal type:
 
+- **Ghostty** — Accessibility API reads each window's `AXDocument` (file URL of CWD) and title. Hybrid scoring: AXDocument match scores 30 (best for direct Claude windows), tmux title match scores 25, other title match scores 20. Case-insensitive path comparison handles macOS filesystem casing differences. Multi-tab windows score each tab individually.
 - **Terminal.app** — AppleScript iterates all windows/tabs, matches `tty of t` against the stored TTY path
 - **iTerm2** — AppleScript matches `unique id of s` against the stored `ITERM_SESSION_ID`
 
@@ -120,24 +143,25 @@ Two strategies based on terminal type:
 
 When killing a session:
 
-1. For Terminal.app: `pkill -TERM -t <tty> -f claude` sends SIGTERM to claude processes on that TTY
+1. For Terminal.app/Ghostty: `pkill -TERM -t <tty> -f claude` sends SIGTERM to claude processes on that TTY
 2. For iTerm2: AppleScript gets the TTY from the iTerm2 session, then uses the same `pkill` approach
-3. Session file is cleaned up after 3 seconds
+3. Session file is marked `status = "dead"` after 3 seconds (file stays on disk)
 
 ## Session JSON Schema
 
 ```json
 {
   "session_id": "uuid",
-  "status": "starting | working | done | attention",
+  "status": "starting | working | idle | attention | shutting_down | dead",
   "project": "directory-name",
   "cwd": "/absolute/path",
-  "terminal": "terminal | iterm2",
+  "terminal": "ghostty | iterm2 | terminal",
   "terminal_session_id": "/dev/ttys018 | w0t0p0:GUID",
   "started_at": "ISO8601",
   "updated_at": "ISO8601",
-  "last_prompt": "first 200 chars of last user prompt"
+  "last_prompt": "first 200 chars of last user prompt",
+  "agent_count": 0
 }
 ```
 
-The decoder uses `decodeIfPresent` with defaults for all fields except `session_id`, making it resilient to schema changes or partial writes.
+The decoder uses `decodeIfPresent` with defaults for all fields except `session_id`, making it resilient to schema changes or partial writes. Corrupt files are skipped (never deleted).

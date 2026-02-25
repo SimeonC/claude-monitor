@@ -111,7 +111,7 @@ The API key is used for:
 
 Click the gear icon in the panel header to access settings at runtime:
 
-- **Refresh sessions** — scans for running Claude processes and creates session files for any that aren't tracked
+- **Refresh sessions** — triggers a re-scan of JSONL files and session directory
 - **Voice on/off** — toggles `announce.enabled`
 - **Voice picker** — select from saved + library voices
 - **Paste voice ID** — reads your clipboard, resolves the voice name via API, saves it to the `voices` array
