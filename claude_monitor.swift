@@ -2,297 +2,6 @@ import Cocoa
 import Combine
 import SwiftUI
 
-// MARK: - Config Manager
-
-struct MonitorConfig: Codable {
-    var tts_provider: String
-    var elevenlabs: ElevenLabsConfig
-    var say: SayConfig
-    var announce: AnnounceConfig
-
-    struct ElevenLabsConfig: Codable {
-        var env_file: String
-        var voice_id: String?
-        var model: String
-        var stability: Double
-        var similarity_boost: Double
-        var voice_design_prompt: String?
-        var voice_design_name: String?
-    }
-    struct SayConfig: Codable {
-        var voice: String
-        var rate: Int
-    }
-    struct AnnounceConfig: Codable {
-        var enabled: Bool
-        var on_done: Bool
-        var on_attention: Bool
-        var on_start: Bool
-        var volume: Double
-    }
-    struct SavedVoice: Codable {
-        var id: String
-        var name: String
-    }
-    var voices: [SavedVoice]?
-}
-
-// MARK: - ElevenLabs Voice Info
-
-struct ElevenLabsVoice: Identifiable {
-    let id: String
-    let name: String
-}
-
-struct ElevenLabsVoicesResponse: Codable {
-    struct Voice: Codable {
-        let voice_id: String
-        let name: String
-        let category: String?
-    }
-    let voices: [Voice]
-}
-
-class VoiceFetcher: ObservableObject {
-    @Published var voices: [ElevenLabsVoice] = []
-    @Published var hasFetched = false
-    private var apiKey: String?
-
-    func loadAPIKey(envFilePath: String) {
-        let expanded = (envFilePath as NSString).expandingTildeInPath
-        guard let content = try? String(contentsOfFile: expanded, encoding: .utf8) else { return }
-        for line in content.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("ELEVENLABS_API_KEY=") {
-                apiKey = String(trimmed.dropFirst("ELEVENLABS_API_KEY=".count))
-                break
-            }
-        }
-    }
-
-    func fetchVoices() {
-        guard let apiKey = apiKey, !apiKey.isEmpty else { return }
-        guard let url = URL(string: "https://api.elevenlabs.io/v1/voices") else { return }
-
-        var request = URLRequest(url: url)
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
-            guard let data = data,
-                let response = try? JSONDecoder().decode(ElevenLabsVoicesResponse.self, from: data)
-            else {
-                return
-            }
-            // Only show user's own voices (cloned, generated, professional), not premade
-            let voices = response.voices
-                .filter { $0.category != "premade" }
-                .map { ElevenLabsVoice(id: $0.voice_id, name: $0.name) }
-                .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            DispatchQueue.main.async {
-                self?.voices = voices
-                self?.hasFetched = true
-            }
-        }.resume()
-    }
-
-    func name(for voiceId: String) -> String? {
-        voices.first(where: { $0.id == voiceId })?.name
-    }
-
-    func resolveVoiceName(id: String, completion: @escaping (String?) -> Void) {
-        guard let apiKey = apiKey, !apiKey.isEmpty else {
-            completion(nil)
-            return
-        }
-        guard let url = URL(string: "https://api.elevenlabs.io/v1/voices/\(id)") else {
-            completion(nil)
-            return
-        }
-        var request = URLRequest(url: url)
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        URLSession.shared.dataTask(with: request) { data, _, _ in
-            guard let data = data,
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let name = json["name"] as? String
-            else {
-                completion(nil)
-                return
-            }
-            completion(name)
-        }.resume()
-    }
-
-    /// Design a voice from a text prompt, save it, and return the voice_id + name
-    func designVoice(prompt: String, name: String, completion: @escaping (String?, String?) -> Void)
-    {
-        guard let apiKey = apiKey, !apiKey.isEmpty else {
-            completion(nil, nil)
-            return
-        }
-        guard let designURL = URL(string: "https://api.elevenlabs.io/v1/text-to-voice/design")
-        else {
-            completion(nil, nil)
-            return
-        }
-
-        // Step 1: Generate preview
-        var request = URLRequest(url: designURL)
-        request.httpMethod = "POST"
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "voice_description": prompt,
-            "text":
-                "Hello. A session just finished — your project is done and ready for review. Another session needs your attention, it looks like there is a permission prompt waiting. Everything else is still running smoothly.",
-            "model_id": "eleven_multilingual_ttv_v2",
-            "guidance_scale": 5,
-            "quality": 0.9,
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            guard let data = data,
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let previews = json["previews"] as? [[String: Any]],
-                let first = previews.first,
-                let generatedId = first["generated_voice_id"] as? String
-            else {
-                completion(nil, nil)
-                return
-            }
-
-            // Step 2: Save as permanent voice
-            self?.saveDesignedVoice(
-                generatedId: generatedId, name: name, prompt: prompt, completion: completion)
-        }.resume()
-    }
-
-    private func saveDesignedVoice(
-        generatedId: String, name: String, prompt: String,
-        completion: @escaping (String?, String?) -> Void
-    ) {
-        guard let apiKey = apiKey, !apiKey.isEmpty else {
-            completion(nil, nil)
-            return
-        }
-        guard let url = URL(string: "https://api.elevenlabs.io/v1/text-to-voice") else {
-            completion(nil, nil)
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: Any] = [
-            "voice_name": name,
-            "voice_description": prompt,
-            "generated_voice_id": generatedId,
-            "labels": ["source": "claude-monitor"],
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        URLSession.shared.dataTask(with: request) { data, _, _ in
-            guard let data = data,
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                let voiceId = json["voice_id"] as? String
-            else {
-                completion(nil, nil)
-                return
-            }
-            let voiceName = json["name"] as? String ?? name
-            completion(voiceId, voiceName)
-        }.resume()
-    }
-}
-
-class ConfigManager: ObservableObject {
-    @Published var config: MonitorConfig?
-    let voiceFetcher = VoiceFetcher()
-
-    static let configPath: String = {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.claude/monitor/config.json"
-    }()
-
-    init() {
-        load()
-        // Kick off voice fetch
-        if let envFile = config?.elevenlabs.env_file {
-            voiceFetcher.loadAPIKey(envFilePath: envFile)
-            voiceFetcher.fetchVoices()
-        }
-    }
-
-    func load() {
-        guard let data = FileManager.default.contents(atPath: Self.configPath),
-            let decoded = try? JSONDecoder().decode(MonitorConfig.self, from: data)
-        else { return }
-        self.config = decoded
-    }
-
-    func setVoice(_ voiceId: String) {
-        config?.elevenlabs.voice_id = voiceId
-        save()
-    }
-
-    func toggleVoice() {
-        config?.announce.enabled.toggle()
-        save()
-    }
-
-    var voiceEnabled: Bool {
-        config?.announce.enabled ?? true
-    }
-
-    func save() {
-        guard let config = config else { return }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(config) else { return }
-        try? data.write(to: URL(fileURLWithPath: Self.configPath))
-    }
-
-    var currentVoiceId: String {
-        config?.elevenlabs.voice_id ?? ""
-    }
-
-    func voiceName(for id: String) -> String? {
-        if let saved = config?.voices?.first(where: { $0.id == id }) {
-            return saved.name
-        }
-        return voiceFetcher.name(for: id)
-    }
-
-    var allVoices: [ElevenLabsVoice] {
-        var combined: [ElevenLabsVoice] = []
-        var seenIds = Set<String>()
-        if let saved = config?.voices {
-            for v in saved {
-                combined.append(ElevenLabsVoice(id: v.id, name: v.name))
-                seenIds.insert(v.id)
-            }
-        }
-        for v in voiceFetcher.voices {
-            if !seenIds.contains(v.id) {
-                combined.append(v)
-            }
-        }
-        return combined
-    }
-
-    func addVoice(id: String, name: String) {
-        var voices = config?.voices ?? []
-        if !voices.contains(where: { $0.id == id }) {
-            voices.append(MonitorConfig.SavedVoice(id: id, name: name))
-            config?.voices = voices
-            save()
-        }
-    }
-}
-
 // MARK: - Color Constants
 
 extension Color {
@@ -1200,14 +909,6 @@ func switchToSession(_ session: SessionInfo) {
         switchByTerminalCwd(cwd: session.cwd)
     }
 
-    // Yield active status so the terminal gets keyboard focus.
-    // The floating panel stays visible but the monitor app deactivates.
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-        NSApp.hide(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            NSApp.unhideWithoutActivation()
-        }
-    }
 }
 
 func switchToITerm2(sessionId: String) {
@@ -1643,222 +1344,6 @@ struct SessionRowView: View {
 
 // MARK: - Header Bar
 
-// MARK: - Settings Popover
-
-struct SettingsPopover: View {
-    @ObservedObject var configManager: ConfigManager
-    @ObservedObject var voiceFetcher: VoiceFetcher
-    var sessionReader: SessionReader?
-    @State private var pastedVoiceId: String? = nil
-    @State private var refreshed = false
-    @State private var isGenerating = false
-    @State private var generateResult: String? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Refresh sessions
-            Button {
-                sessionReader?.scanProjects()
-                sessionReader?.readSessions()
-                refreshed = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { refreshed = false }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: refreshed ? "checkmark" : "arrow.clockwise")
-                        .font(.system(size: 10))
-                        .foregroundColor(refreshed ? .green : .white.opacity(0.4))
-                    Text(refreshed ? "Refreshed" : "Refresh sessions")
-                        .font(.system(size: 11))
-                        .foregroundColor(refreshed ? .green.opacity(0.8) : .white.opacity(0.6))
-                    Spacer()
-                }
-            }
-            .buttonStyle(.plain)
-
-            Divider().background(Color.white.opacity(0.1))
-
-            // Master toggle
-            Button {
-                configManager.toggleVoice()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(
-                        systemName: configManager.voiceEnabled
-                            ? "speaker.wave.2.fill" : "speaker.slash.fill"
-                    )
-                    .font(.system(size: 10))
-                    .foregroundColor(configManager.voiceEnabled ? .cyan : .gray)
-                    Text(configManager.voiceEnabled ? "Voice on" : "Voice off")
-                        .font(.system(size: 11))
-                        .foregroundColor(configManager.voiceEnabled ? .white : .white.opacity(0.4))
-                    Spacer()
-                }
-            }
-            .buttonStyle(.plain)
-
-            if configManager.voiceEnabled {
-                Divider().background(Color.white.opacity(0.1))
-
-                // Current voice display
-                if let name = configManager.voiceName(for: configManager.currentVoiceId) {
-                    HStack(spacing: 4) {
-                        Text(name)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.cyan)
-                        Spacer()
-                        Text(String(configManager.currentVoiceId.prefix(8)))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.2))
-                    }
-                }
-
-                Text("Voice")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.white.opacity(0.4))
-                    .textCase(.uppercase)
-
-                if voiceFetcher.hasFetched || !(configManager.config?.voices ?? []).isEmpty {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(configManager.allVoices) { voice in
-                                let isSelected = configManager.currentVoiceId == voice.id
-                                Button {
-                                    configManager.setVoice(voice.id)
-                                    pastedVoiceId = nil
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Circle()
-                                            .fill(
-                                                isSelected ? Color.cyan : Color.white.opacity(0.15)
-                                            )
-                                            .frame(width: 6, height: 6)
-                                        Text(voice.name)
-                                            .font(.system(size: 11))
-                                            .foregroundColor(
-                                                isSelected ? .white : .white.opacity(0.5)
-                                            )
-                                            .lineLimit(1)
-                                        Spacer()
-                                    }
-                                    .padding(.vertical, 2)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    .frame(maxHeight: 180)
-                } else {
-                    Text("Loading voices...")
-                        .font(.system(size: 10))
-                        .foregroundColor(.white.opacity(0.3))
-                }
-
-                Divider().background(Color.white.opacity(0.1))
-
-                // Paste voice ID from clipboard
-                Button {
-                    if let pasted = NSPasteboard.general.string(forType: .string)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines),
-                        !pasted.isEmpty
-                    {
-                        configManager.setVoice(pasted)
-                        pastedVoiceId = String(pasted.prefix(20))
-                        // Resolve name and persist to voice list
-                        let voiceId = pasted
-                        if let existing = configManager.voiceName(for: voiceId) {
-                            configManager.addVoice(id: voiceId, name: existing)
-                        } else {
-                            voiceFetcher.resolveVoiceName(id: voiceId) { name in
-                                DispatchQueue.main.async {
-                                    configManager.addVoice(
-                                        id: voiceId,
-                                        name: name ?? "Voice \(String(voiceId.prefix(8)))")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 9))
-                            .foregroundColor(.white.opacity(0.3))
-                        Text("Paste voice ID")
-                            .font(.system(size: 10))
-                            .foregroundColor(.white.opacity(0.4))
-                        Spacer()
-                    }
-                }
-                .buttonStyle(.plain)
-
-                if let pasted = pastedVoiceId {
-                    Text("Set to \(pasted)...")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(.green.opacity(0.6))
-                }
-
-                // Generate voice from design prompt
-                if let prompt = configManager.config?.elevenlabs.voice_design_prompt,
-                    !prompt.isEmpty
-                {
-                    Divider().background(Color.white.opacity(0.1))
-
-                    Button {
-                        guard !isGenerating else { return }
-                        isGenerating = true
-                        generateResult = nil
-                        let voiceName =
-                            configManager.config?.elevenlabs.voice_design_name ?? "claude-monitor"
-                        voiceFetcher.designVoice(prompt: prompt, name: voiceName) { voiceId, name in
-                            DispatchQueue.main.async {
-                                isGenerating = false
-                                if let voiceId = voiceId, let name = name {
-                                    configManager.setVoice(voiceId)
-                                    configManager.addVoice(id: voiceId, name: name)
-                                    generateResult = name
-                                    voiceFetcher.fetchVoices()
-                                } else {
-                                    generateResult = "failed"
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            if isGenerating {
-                                ProgressView()
-                                    .scaleEffect(0.5)
-                                    .frame(width: 10, height: 10)
-                            } else {
-                                Image(systemName: "wand.and.stars")
-                                    .font(.system(size: 9))
-                                    .foregroundColor(.purple.opacity(0.6))
-                            }
-                            Text(isGenerating ? "Generating..." : "Generate voice")
-                                .font(.system(size: 10))
-                                .foregroundColor(
-                                    isGenerating ? .purple.opacity(0.4) : .purple.opacity(0.6))
-                            Spacer()
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isGenerating)
-
-                    if let result = generateResult {
-                        Text(result == "failed" ? "Generation failed" : "Created \"\(result)\"")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(
-                                result == "failed" ? .red.opacity(0.6) : .green.opacity(0.6))
-                    }
-                }
-            }
-        }
-        .padding(10)
-        .frame(width: 200)
-        .background(
-            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-        )
-    }
-}
-
 struct RefreshButton: View {
     var sessionReader: SessionReader?
     @State private var showCheck = false
@@ -1877,14 +1362,13 @@ struct RefreshButton: View {
                 .foregroundColor(.white.opacity(0.7))
         }
         .buttonStyle(.plain)
+        .focusable(false)
     }
 }
 
 struct HeaderBar: View {
     let sessions: [SessionInfo]
-    @ObservedObject var configManager: ConfigManager
     var sessionReader: SessionReader?
-    @State private var showSettings = false
 
     var attentionCount: Int { sessions.filter { $0.status == "attention" }.count }
     var workingCount: Int { sessions.filter { $0.status == "working" }.count }
@@ -1938,21 +1422,6 @@ struct HeaderBar: View {
                     .fixedSize()
 
                 RefreshButton(sessionReader: sessionReader)
-
-                Button {
-                    showSettings.toggle()
-                } label: {
-                    Image(systemName: "gearshape.fill")
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.7))
-                }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .popover(isPresented: $showSettings, arrowEdge: .bottom) {
-                    SettingsPopover(
-                        configManager: configManager, voiceFetcher: configManager.voiceFetcher,
-                        sessionReader: sessionReader)
-                }
             }
         }
         .padding(.horizontal, 12)
@@ -1965,14 +1434,13 @@ struct HeaderBar: View {
 struct MonitorContentView: View {
     @ObservedObject var reader: SessionReader
     @ObservedObject var teamReader: TeamReader
-    @ObservedObject var configManager: ConfigManager
     @State private var isExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
             // Header — always visible, drag to move
             HeaderBar(
-                sessions: reader.sessions, configManager: configManager, sessionReader: reader)
+                sessions: reader.sessions, sessionReader: reader)
 
             if isExpanded && !reader.sessions.isEmpty {
                 Divider()
@@ -1981,17 +1449,16 @@ struct MonitorContentView: View {
                 ScrollView {
                     VStack(spacing: 0) {
                         ForEach(reader.sessions) { session in
-                            Button {
-                                switchToSession(session)
-                            } label: {
-                                SessionRowView(
-                                    session: session,
-                                    teamInfo: teamReader.teamsBySession[session.session_id],
-                                    onKill: { killSession(session) }
-                                )
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
+                            SessionRowView(
+                                session: session,
+                                teamInfo: teamReader.teamsBySession[session.session_id],
+                                onKill: { killSession(session) }
+                            )
+                            .overlay(
+                                FirstMouseClickArea {
+                                    switchToSession(session)
+                                }
+                            )
                             if session.id != reader.sessions.last?.id {
                                 Divider()
                                     .background(Color.white.opacity(0.05))
@@ -2091,7 +1558,7 @@ struct VisualEffectView: NSViewRepresentable {
 // MARK: - Floating Panel
 
 class FloatingPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     init() {
@@ -2137,6 +1604,71 @@ class ClickHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+// MARK: - First-Mouse Click Overlay (drag-safe)
+
+struct FirstMouseClickArea: NSViewRepresentable {
+    let action: () -> Void
+    private static let dragThreshold: CGFloat = 4
+
+    func makeNSView(context: Context) -> ClickNSView {
+        let view = ClickNSView()
+        view.action = action
+        return view
+    }
+    func updateNSView(_ nsView: ClickNSView, context: Context) {
+        nsView.action = action
+    }
+
+    class ClickNSView: NSView {
+        var action: (() -> Void)?
+        private var mouseDownScreenLocation: NSPoint?
+        private var monitors: [Any] = []
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            removeMonitors()
+            guard window != nil else { return }
+
+            if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown, handler: { [weak self] event in
+                if let self = self, event.window === self.window {
+                    let loc = self.convert(event.locationInWindow, from: nil)
+                    if self.bounds.contains(loc) {
+                        self.mouseDownScreenLocation = NSEvent.mouseLocation
+                    }
+                }
+                return event
+            }) { monitors.append(m) }
+
+            if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp, handler: { [weak self] event in
+                if let self = self, let downLoc = self.mouseDownScreenLocation {
+                    let upLoc = NSEvent.mouseLocation
+                    let dx = abs(upLoc.x - downLoc.x)
+                    let dy = abs(upLoc.y - downLoc.y)
+                    self.mouseDownScreenLocation = nil
+                    if dx < FirstMouseClickArea.dragThreshold && dy < FirstMouseClickArea.dragThreshold {
+                        self.action?()
+                    }
+                }
+                return event
+            }) { monitors.append(m) }
+        }
+
+        override func removeFromSuperview() {
+            removeMonitors()
+            super.removeFromSuperview()
+        }
+
+        private func removeMonitors() {
+            for m in monitors { NSEvent.removeMonitor(m) }
+            monitors.removeAll()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
 // MARK: - Window Drag Handle (NSViewRepresentable)
 
 struct WindowDragHandle: NSViewRepresentable {
@@ -2157,7 +1689,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: FloatingPanel!
     let reader = SessionReader()
     let teamReader = TeamReader()
-    let configManager = ConfigManager()
     var sizeObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -2167,7 +1698,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let hostingView = ClickHostingView(
             rootView: MonitorContentView(
-                reader: reader, teamReader: teamReader, configManager: configManager)
+                reader: reader, teamReader: teamReader)
         )
         hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: 40))
         hostingView.wantsLayer = true
