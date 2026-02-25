@@ -6,7 +6,7 @@
 # Usage: monitor.sh [event]
 # Receives hook JSON on stdin
 
-set -euo pipefail
+set -uo pipefail
 
 INPUT=$(cat)
 

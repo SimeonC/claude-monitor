@@ -1222,7 +1222,10 @@ struct SessionRowView: View {
     @State private var badgeScale: CGFloat = 1.0
 
     private var badgeCount: Int {
-        max(teamInfo?.activeAgentCount ?? 0, session.agent_count)
+        let teamCount = teamInfo?.activeAgentCount ?? 0
+        // Subagents only run during a turn — if session is idle, agent_count is stale
+        let agentCount = session.status == "working" ? session.agent_count : 0
+        return max(teamCount, agentCount)
     }
 
     var body: some View {
@@ -1266,6 +1269,7 @@ struct SessionRowView: View {
                             }
                         }
                         .fixedSize()
+                        .offset(y: 1)
                     } else {
                         PulsingDot(
                             color: session.statusColor,
