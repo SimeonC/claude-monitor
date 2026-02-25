@@ -1299,16 +1299,15 @@ struct SessionRowView: View {
                                     if isKilling {
                                         PulsingDot(color: .red, isPulsing: true)
                                     } else if isHovered {
-                                        Button {
-                                            isKilling = true
-                                            onKill?()
-                                        } label: {
-                                            Image(systemName: "xmark")
-                                                .font(.system(size: 10, weight: .semibold))
-                                                .foregroundColor(.white.opacity(0.4))
-                                                .contentShape(Rectangle())
-                                        }
-                                        .buttonStyle(.plain)
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 10, weight: .semibold))
+                                            .foregroundColor(.white.opacity(0.4))
+                                            .overlay(
+                                                FirstMouseClickArea {
+                                                    isKilling = true
+                                                    onKill?()
+                                                }
+                                            )
                                     }
                                 }
                                 .frame(width: 20, height: 20)
@@ -1606,9 +1605,72 @@ class ClickHostingView<Content: View>: NSHostingView<Content> {
 
 // MARK: - First-Mouse Click Overlay (drag-safe)
 
+// Shared coordinator: collects all click areas, fires only the smallest on click
+private class ClickAreaCoordinator {
+    static let shared = ClickAreaCoordinator()
+    private static let dragThreshold: CGFloat = 4
+
+    private var areas: [WeakClickArea] = []
+    private var monitors: [Any] = []
+    private var mouseDownScreenLocation: NSPoint?
+
+    private struct WeakClickArea {
+        weak var view: FirstMouseClickArea.ClickNSView?
+    }
+
+    func register(_ view: FirstMouseClickArea.ClickNSView) {
+        areas.removeAll { $0.view == nil }
+        guard !areas.contains(where: { $0.view === view }) else { return }
+        areas.append(WeakClickArea(view: view))
+        installMonitors()
+    }
+
+    func unregister(_ view: FirstMouseClickArea.ClickNSView) {
+        areas.removeAll { $0.view == nil || $0.view === view }
+    }
+
+    private func installMonitors() {
+        guard monitors.isEmpty else { return }
+
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown, handler: { [weak self] event in
+            self?.mouseDownScreenLocation = NSEvent.mouseLocation
+            return event
+        }) { monitors.append(m) }
+
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp, handler: { [weak self] event in
+            guard let self = self, let downLoc = self.mouseDownScreenLocation else { return event }
+            self.mouseDownScreenLocation = nil
+
+            let upLoc = NSEvent.mouseLocation
+            let dx = abs(upLoc.x - downLoc.x)
+            let dy = abs(upLoc.y - downLoc.y)
+            guard dx < ClickAreaCoordinator.dragThreshold && dy < ClickAreaCoordinator.dragThreshold else {
+                return event
+            }
+
+            // Find all areas that contain the click, pick the smallest
+            var best: FirstMouseClickArea.ClickNSView?
+            var bestArea: CGFloat = .greatestFiniteMagnitude
+            for weak in self.areas {
+                guard let view = weak.view, let window = view.window,
+                      event.window === window else { continue }
+                let loc = view.convert(event.locationInWindow, from: nil)
+                if view.bounds.contains(loc) {
+                    let area = view.bounds.width * view.bounds.height
+                    if area < bestArea {
+                        best = view
+                        bestArea = area
+                    }
+                }
+            }
+            best?.action?()
+            return event
+        }) { monitors.append(m) }
+    }
+}
+
 struct FirstMouseClickArea: NSViewRepresentable {
     let action: () -> Void
-    private static let dragThreshold: CGFloat = 4
 
     func makeNSView(context: Context) -> ClickNSView {
         let view = ClickNSView()
@@ -1621,48 +1683,21 @@ struct FirstMouseClickArea: NSViewRepresentable {
 
     class ClickNSView: NSView {
         var action: (() -> Void)?
-        private var mouseDownScreenLocation: NSPoint?
-        private var monitors: [Any] = []
 
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            removeMonitors()
-            guard window != nil else { return }
-
-            if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown, handler: { [weak self] event in
-                if let self = self, event.window === self.window {
-                    let loc = self.convert(event.locationInWindow, from: nil)
-                    if self.bounds.contains(loc) {
-                        self.mouseDownScreenLocation = NSEvent.mouseLocation
-                    }
-                }
-                return event
-            }) { monitors.append(m) }
-
-            if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp, handler: { [weak self] event in
-                if let self = self, let downLoc = self.mouseDownScreenLocation {
-                    let upLoc = NSEvent.mouseLocation
-                    let dx = abs(upLoc.x - downLoc.x)
-                    let dy = abs(upLoc.y - downLoc.y)
-                    self.mouseDownScreenLocation = nil
-                    if dx < FirstMouseClickArea.dragThreshold && dy < FirstMouseClickArea.dragThreshold {
-                        self.action?()
-                    }
-                }
-                return event
-            }) { monitors.append(m) }
+            if window != nil {
+                ClickAreaCoordinator.shared.register(self)
+            } else {
+                ClickAreaCoordinator.shared.unregister(self)
+            }
         }
 
         override func removeFromSuperview() {
-            removeMonitors()
+            ClickAreaCoordinator.shared.unregister(self)
             super.removeFromSuperview()
-        }
-
-        private func removeMonitors() {
-            for m in monitors { NSEvent.removeMonitor(m) }
-            monitors.removeAll()
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
