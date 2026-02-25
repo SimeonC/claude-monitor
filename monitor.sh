@@ -141,7 +141,7 @@ case "$EVENT" in
             CURRENT_STATUS=$(jq -r '.status // ""' "$SESSION_FILE")
             if [ "$CURRENT_STATUS" = "shutting_down" ] || [ "$CURRENT_STATUS" = "dead" ]; then
                 jq \
-                    --arg status "starting" \
+                    --arg status "idle" \
                     --arg updated "$NOW" \
                     '.status = $status | .updated_at = $updated' \
                     "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"

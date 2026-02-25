@@ -452,9 +452,8 @@ class SessionReader: ObservableObject {
         guard let data = try? JSONEncoder().encode(session) else { return }
         let tmpPath = path + ".tmp"
         try? data.write(to: URL(fileURLWithPath: tmpPath))
-        // Remove destination first — moveItem fails if it already exists
-        try? FileManager.default.removeItem(atPath: path)
-        try? FileManager.default.moveItem(atPath: tmpPath, toPath: path)
+        // POSIX rename() is atomic — no window where the file doesn't exist
+        rename(tmpPath, path)
     }
 
     /// Find the JSONL file path for a session ID by scanning project directories.
@@ -528,27 +527,33 @@ class SessionReader: ObservableObject {
                 // Only create new files for very fresh JSONLs (monitor restart recovery).
                 let sessionFile = "\(sessionsDir)/\(sessionId).json"
                 if let data = fm.contents(atPath: sessionFile),
-                    let existing = try? JSONDecoder().decode(SessionInfo.self, from: data)
+                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 {
                     // Don't touch shutting_down sessions — they're waiting to be hidden
-                    if existing.status == "shutting_down" { continue }
+                    if json["status"] as? String == "shutting_down" { continue }
 
-                    var updated = existing
-                    if updated.project == "unknown" || updated.cwd.isEmpty {
-                        updated.project = project
-                        updated.cwd = cwd
+                    // Update only scanner-owned fields; preserve status and everything else from disk
+                    var updated = json
+                    if (updated["project"] as? String) == "unknown" || (updated["cwd"] as? String ?? "").isEmpty {
+                        updated["project"] = project
+                        updated["cwd"] = cwd
                     }
                     if !lastPrompt.isEmpty {
-                        updated.last_prompt = lastPrompt
+                        updated["last_prompt"] = lastPrompt
                     }
-                    updated.agent_count = agentCount
-                    updated.updated_at = nowString
-                    writeSessionFile(updated, to: sessionFile)
+                    updated["agent_count"] = agentCount
+                    updated["updated_at"] = nowString
+                    if let outData = try? JSONSerialization.data(withJSONObject: updated) {
+                        let tmpPath = sessionFile + ".tmp"
+                        try? outData.write(to: URL(fileURLWithPath: tmpPath))
+                        rename(tmpPath, sessionFile)
+                    }
                 } else if mtime > now.addingTimeInterval(-30) {
                     // Only create for JSONLs modified in last 30s (recovery after monitor restart).
                     // Older JSONLs without session files were intentionally cleaned up.
+                    // Use "idle" — a recovered session is not truly starting, it was already running.
                     let session = SessionInfo(
-                        session_id: sessionId, status: "starting",
+                        session_id: sessionId, status: "idle",
                         project: project, cwd: cwd,
                         terminal: "", terminal_session_id: "",
                         started_at: lastTimestamp ?? nowString,
@@ -1169,8 +1174,7 @@ func killSession(_ session: SessionInfo) {
             if let encoded = try? JSONEncoder().encode(s) {
                 let tmp = sessionFile + ".tmp"
                 try? encoded.write(to: URL(fileURLWithPath: tmp))
-                try? FileManager.default.removeItem(atPath: sessionFile)
-                try? FileManager.default.moveItem(atPath: tmp, toPath: sessionFile)
+                rename(tmp, sessionFile)
             }
         }
     }
