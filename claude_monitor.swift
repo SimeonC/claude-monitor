@@ -1518,6 +1518,11 @@ struct SessionRowView: View {
     var onKill: (() -> Void)? = nil
     @State private var isHovered = false
     @State private var isKilling = false
+    @State private var badgeScale: CGFloat = 1.0
+
+    private var badgeCount: Int {
+        max(teamInfo?.activeAgentCount ?? 0, session.agent_count)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -1525,11 +1530,48 @@ struct SessionRowView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    PulsingDot(
-                        color: session.statusColor,
-                        isPulsing: session.status == "working"
-                    )
-                    .offset(y: 1)
+                    if badgeCount > 0 {
+                        HStack(spacing: 3) {
+                            Image(systemName: "person.2.fill")
+                                .font(.system(size: 8))
+                            Text("\(badgeCount)")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        }
+                        .foregroundColor(session.statusColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(session.statusColor.opacity(0.2))
+                        )
+                        .scaleEffect(badgeScale)
+                        .shadow(color: session.status == "working" ? session.statusColor.opacity(0.6) : .clear, radius: 4)
+                        .onAppear {
+                            if session.status == "working" {
+                                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                                    badgeScale = 1.1
+                                }
+                            }
+                        }
+                        .onChange(of: session.status) { _, newValue in
+                            if newValue == "working" {
+                                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                                    badgeScale = 1.1
+                                }
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.3)) {
+                                    badgeScale = 1.0
+                                }
+                            }
+                        }
+                        .fixedSize()
+                    } else {
+                        PulsingDot(
+                            color: session.statusColor,
+                            isPulsing: session.status == "working"
+                        )
+                        .offset(y: 1)
+                    }
 
                     Text(session.project)
                         .font(.system(size: 13, weight: .semibold, design: .default))
@@ -1539,49 +1581,6 @@ struct SessionRowView: View {
                         .layoutPriority(1)
 
                     Spacer(minLength: 4)
-
-                    Text(session.elapsedString)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.5))
-                        .fixedSize()
-
-                    let badgeCount = max(teamInfo?.activeAgentCount ?? 0, session.agent_count)
-                    if badgeCount > 0 {
-                        HStack(spacing: 3) {
-                            Image(systemName: "person.2.fill")
-                                .font(.system(size: 8))
-                            Text("\(badgeCount)")
-                                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        }
-                        .foregroundColor(.white.opacity(0.5))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(Color.white.opacity(0.08))
-                        )
-                        .fixedSize()
-                    }
-
-                    if onKill != nil {
-                        ZStack {
-                            if isKilling {
-                                PulsingDot(color: .red, isPulsing: true)
-                            } else if isHovered {
-                                Button {
-                                    isKilling = true
-                                    onKill?()
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundColor(.white.opacity(0.4))
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .frame(width: 28, height: 28)
-                    }
 
                     Text(session.displayStatus)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -1593,14 +1592,45 @@ struct SessionRowView: View {
                                 .fill(session.statusColor.opacity(session.isStale ? 0.08 : 0.2))
                         )
                         .fixedSize()
+                        .overlay(alignment: .leading) {
+                            if onKill != nil {
+                                ZStack {
+                                    if isKilling {
+                                        PulsingDot(color: .red, isPulsing: true)
+                                    } else if isHovered {
+                                        Button {
+                                            isKilling = true
+                                            onKill?()
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundColor(.white.opacity(0.4))
+                                                .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .frame(width: 20, height: 20)
+                                .offset(x: -24)
+                            }
+                        }
                 }
 
-                if !session.last_prompt.isEmpty {
-                    Text(session.last_prompt)
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.55))
-                        .lineLimit(2)
-                        .truncationMode(.tail)
+                HStack(spacing: 6) {
+                    if !session.last_prompt.isEmpty {
+                        Text(session.last_prompt)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.55))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    Text(session.elapsedString)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.5))
+                        .fixedSize()
                 }
             }
         }
@@ -1873,7 +1903,7 @@ struct HeaderBar: View {
 
             Spacer()
 
-            HStack(spacing: 8) {
+            HStack(spacing: 12) {
                 if attentionCount > 0 {
                     HStack(spacing: 3) {
                         Circle().fill(Color.orange).frame(width: 6, height: 6)
@@ -1881,6 +1911,7 @@ struct HeaderBar: View {
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.orange)
                     }
+                    .fixedSize()
                 }
                 if workingCount > 0 {
                     HStack(spacing: 3) {
@@ -1889,6 +1920,7 @@ struct HeaderBar: View {
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.workingBlue)
                     }
+                    .fixedSize()
                 }
                 if idleCount > 0 {
                     HStack(spacing: 3) {
@@ -1897,11 +1929,13 @@ struct HeaderBar: View {
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.doneGreen)
                     }
+                    .fixedSize()
                 }
 
                 Text("\(sessions.count)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.white.opacity(0.4))
+                    .fixedSize()
 
                 RefreshButton(sessionReader: sessionReader)
 
