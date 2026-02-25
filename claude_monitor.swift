@@ -798,7 +798,7 @@ class SessionReader: ObservableObject {
 
         // Aggregate sessions with the same project name
         let statusPriority: [String: Int] = [
-            "attention": 0, "working": 1, "idle": 2, "shutting_down": 3, "starting": 4,
+            "working": 0, "attention": 1, "idle": 2, "shutting_down": 3, "starting": 4,
         ]
         var grouped: [String: [SessionInfo]] = [:]
         for s in loaded { grouped[s.project, default: []].append(s) }
@@ -844,6 +844,10 @@ class SessionReader: ObservableObject {
                 aggregated.append(group[0])
                 continue
             }
+            NSLog("[ClaudeMonitor] aggregating group of %d sessions for project '%@':", group.count, group[0].project)
+            for s in group {
+                NSLog("[ClaudeMonitor]   sid=%@ status=%@ terminal=%@ tty=%@ cwd=%@ updated=%@", s.session_id, s.status, s.terminal, s.terminal_session_id, s.cwd, s.updated_at)
+            }
             // Pick representative: highest-priority status, then most recently updated
             let best = group.min { a, b in
                 let pa = statusPriority[a.status] ?? 9
@@ -882,6 +886,7 @@ class SessionReader: ObservableObject {
                 }
             }
             merged.started_at = earliest
+            NSLog("[ClaudeMonitor]   → representative: sid=%@ status=%@ terminal=%@ tty=%@ cwd=%@", merged.session_id, merged.status, merged.terminal, merged.terminal_session_id, merged.cwd)
             aggregated.append(merged)
         }
 
@@ -901,7 +906,7 @@ class SessionReader: ObservableObject {
 
 func switchToSession(_ session: SessionInfo) {
     NSLog(
-        "[ClaudeMonitor] switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project)"
+        "[ClaudeMonitor] switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project) cwd=\(session.cwd) sid=\(session.session_id)"
     )
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
@@ -1102,6 +1107,10 @@ func switchToGhostty(cwd: String, ttyPath: String) {
 
     // Sort by score descending
     candidates.sort { $0.score > $1.score }
+    NSLog("[ClaudeMonitor] switchToGhostty: %d candidates for cwd=%@ basename=%@", candidates.count, cwd, basename)
+    for c in candidates {
+        NSLog("[ClaudeMonitor]   candidate: \"\(c.title)\" score=\(c.score)")
+    }
 
     if let best = candidates.first {
         NSLog("[ClaudeMonitor] switchToGhostty: matched \"\(best.title)\" (score=\(best.score), doc-based=\(best.score >= 30)) for project \(basename)")
