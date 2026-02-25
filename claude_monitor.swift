@@ -662,21 +662,28 @@ class SessionReader: ObservableObject {
                 updated = isoFormatter.date(from: session.updated_at)
             }
             if let updated = updated, updated < bootTime {
-                try? fm.removeItem(atPath: path)
+                var dead = session
+                dead.status = "dead"
+                writeSessionFile(dead, to: path)
                 NSLog(
-                    "[ClaudeMonitor] Pruned pre-boot session %@ (updated %@)", session.session_id,
+                    "[ClaudeMonitor] Marked pre-boot session %@ as dead (updated %@)", session.session_id,
                     session.updated_at)
             }
         }
     }
 
-    /// Remove legacy `discovered-*` session files from the old TTY-based discovery system.
+    /// Mark legacy `discovered-*` session files as dead.
     private func cleanupLegacyDiscoveredSessions() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
         for file in files where file.hasPrefix("discovered-") && file.hasSuffix(".json") {
-            try? fm.removeItem(atPath: "\(sessionsDir)/\(file)")
-            NSLog("[ClaudeMonitor] Removed legacy discovered session %@", file)
+            let path = "\(sessionsDir)/\(file)"
+            if let data = fm.contents(atPath: path),
+               var session = try? JSONDecoder().decode(SessionInfo.self, from: data) {
+                session.status = "dead"
+                writeSessionFile(session, to: path)
+            }
+            NSLog("[ClaudeMonitor] Marked legacy discovered session %@ as dead", file)
         }
     }
 
@@ -873,6 +880,8 @@ class SessionReader: ObservableObject {
             var noInfoSessions: [SessionInfo] = []
 
             for session in currentSessions {
+                // Skip already-dead sessions
+                if session.status == "dead" { continue }
                 // Skip "starting" sessions — they're brand new, may not have JSONL yet
                 if session.status == "starting" && !session.isStale { continue }
 
@@ -988,15 +997,19 @@ class SessionReader: ObservableObject {
                 deadSessionIds.append(session.session_id)
             }
 
-            // Delete dead session files (skip team leads with active agents)
+            // Mark dead sessions (skip team leads with active agents)
             for sid in deadSessionIds {
                 if self.sessionHasActiveTeam(sid) {
                     NSLog("[ClaudeMonitor] Skipping prune of team lead %@ (has active agents)", sid)
                     continue
                 }
                 let path = "\(self.sessionsDir)/\(sid).json"
-                try? FileManager.default.removeItem(atPath: path)
-                NSLog("[ClaudeMonitor] Pruned dead session %@", sid)
+                if let data = FileManager.default.contents(atPath: path),
+                   var session = try? JSONDecoder().decode(SessionInfo.self, from: data) {
+                    session.status = "dead"
+                    self.writeSessionFile(session, to: path)
+                }
+                NSLog("[ClaudeMonitor] Marked dead session %@", sid)
             }
         }
     }
@@ -1049,6 +1062,8 @@ class SessionReader: ObservableObject {
             guard let data = fm.contents(atPath: path) else { continue }
             do {
                 let session = try JSONDecoder().decode(SessionInfo.self, from: data)
+                // Never show dead sessions
+                if session.status == "dead" { continue }
                 // Hide shutting_down sessions after 30s (file stays for potential resume)
                 if session.status == "shutting_down" {
                     isoFmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -1062,9 +1077,8 @@ class SessionReader: ObservableObject {
                 loaded.append(session)
             } catch {
                 NSLog(
-                    "[ClaudeMonitor] Deleting corrupt session file %@: %@", file,
+                    "[ClaudeMonitor] Skipping corrupt session file %@: %@", file,
                     error.localizedDescription)
-                try? fm.removeItem(atPath: path)
             }
         }
 
@@ -1178,7 +1192,7 @@ func switchToSession(_ session: SessionInfo) {
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
     } else if session.terminal == "ghostty" {
-        switchToGhostty(cwd: session.cwd)
+        switchToGhostty(cwd: session.cwd, ttyPath: session.terminal_session_id)
     } else if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
         switchToTerminal(ttyPath: session.terminal_session_id)
     } else {
@@ -1253,27 +1267,21 @@ func switchToTerminal(ttyPath: String) {
     }
 }
 
-func switchToGhostty(cwd: String) {
+func switchToGhostty(cwd: String, ttyPath: String) {
     let basename = (cwd as NSString).lastPathComponent
 
-    // Find the Ghostty process
     guard
         let ghosttyApp = NSRunningApplication.runningApplications(
             withBundleIdentifier: "com.mitchellh.ghostty"
         ).first
             ?? NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Ghostty" }
             )
-    else {
-        return
-    }
+    else { return }
 
     let appElement = AXUIElementCreateApplication(ghosttyApp.processIdentifier)
-
-    // Request accessibility if needed
     let opts = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
     _ = AXIsProcessTrustedWithOptions(opts)
 
-    // Get all windows
     var windowsRef: CFTypeRef?
     guard
         AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
@@ -1284,19 +1292,119 @@ func switchToGhostty(cwd: String) {
         return
     }
 
-    // Find window whose title contains project basename or cwd
+    // Helper: find the tab group and tabs for a window
+    func getTabs(_ window: AXUIElement) -> [AXUIElement]? {
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else { return nil }
+        for child in children {
+            var roleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleRef)
+            if (roleRef as? String) == "AXTabGroup" {
+                var tabsRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(child, kAXChildrenAttribute as CFString, &tabsRef) == .success,
+                   let tabs = tabsRef as? [AXUIElement] { return tabs }
+            }
+        }
+        return nil
+    }
+
+    // Helper: read AXDocument from a window (file URL of CWD, reliable for direct Claude windows)
+    func getDocument(_ window: AXUIElement) -> String {
+        var docRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &docRef) == .success,
+              let doc = docRef as? String else { return "" }
+        return doc
+    }
+
+    struct Candidate {
+        let window: AXUIElement
+        let tab: AXUIElement?
+        let title: String
+        let score: Int
+    }
+
+    var candidates: [Candidate] = []
+    let basenameLower = basename.lowercased()
+    // Normalize CWD for AXDocument comparison (AXDocument is a file URL)
+    let cwdNormalized = cwd.hasSuffix("/") ? cwd : cwd + "/"
+
+    // Score by AXDocument: if the file URL contains the session CWD path
+    // Use case-insensitive comparison — macOS filesystem is case-insensitive
+    // but CWD and AXDocument may differ in case (e.g. "Development" vs "development")
+    func scoreDocument(_ doc: String) -> Int {
+        guard !doc.isEmpty else { return 0 }
+        if let url = URL(string: doc), url.scheme == "file" {
+            let docPath = url.path.lowercased()
+            let docNormalized = docPath.hasSuffix("/") ? docPath : docPath + "/"
+            let cwdLower = cwdNormalized.lowercased()
+            if docNormalized == cwdLower || docNormalized.hasPrefix(cwdLower) {
+                return 30
+            }
+        }
+        return 0
+    }
+
+    // Score by title: if it contains project folder basename
+    func scoreTitle(_ title: String) -> Int {
+        let lower = title.lowercased()
+        if lower.contains(basenameLower) {
+            if lower.hasPrefix("tmux ") { return 25 }
+            return 20
+        }
+        return 0
+    }
+
     for window in windows {
         var titleRef: CFTypeRef?
-        guard
-            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
-                == .success,
-            let title = titleRef as? String
-        else { continue }
+        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+        let windowTitle = titleRef as? String ?? ""
+        let document = getDocument(window)
 
-        if title.contains(basename) || title.contains(cwd) {
-            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-            break
+        // Compute window-level scores
+        let docScore = scoreDocument(document)
+        let titleScore = scoreTitle(windowTitle)
+        let windowScore = max(docScore, titleScore)
+
+        // For multi-tab windows, score each tab individually too
+        if let tabs = getTabs(window), tabs.count > 1 {
+            var hadTabMatch = false
+            for tab in tabs {
+                var tabTitleRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &tabTitleRef)
+                let tabTitle = tabTitleRef as? String ?? ""
+                guard !tabTitle.isEmpty else { continue }
+                let tabScore = scoreTitle(tabTitle)
+                // Use best of tab title score and window-level AXDocument score
+                let s = max(tabScore, docScore)
+                if s > 0 {
+                    candidates.append(Candidate(window: window, tab: tab, title: tabTitle, score: s))
+                    hadTabMatch = true
+                }
+            }
+            // If AXDocument matched but no individual tab did, add window-level candidate
+            if !hadTabMatch && docScore > 0 {
+                candidates.append(Candidate(window: window, tab: nil, title: windowTitle, score: docScore))
+            }
+        } else {
+            // Single-tab window
+            if windowScore > 0 {
+                candidates.append(Candidate(window: window, tab: nil, title: windowTitle, score: windowScore))
+            }
         }
+    }
+
+    // Sort by score descending
+    candidates.sort { $0.score > $1.score }
+
+    if let best = candidates.first {
+        NSLog("[ClaudeMonitor] switchToGhostty: matched \"\(best.title)\" (score=\(best.score), doc-based=\(best.score >= 30)) for project \(basename)")
+        if let tab = best.tab {
+            AXUIElementPerformAction(tab, kAXPressAction as CFString)
+        }
+        AXUIElementPerformAction(best.window, kAXRaiseAction as CFString)
+    } else {
+        NSLog("[ClaudeMonitor] switchToGhostty: no match for \(basename)")
     }
     ghosttyApp.activate()
 }
@@ -1350,11 +1458,20 @@ func killSession(_ session: SessionInfo) {
         try? task.run()
     }
 
-    // Clean up session file after delay
+    // Mark session as dead after delay
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     let sessionFile = "\(home)/.claude/monitor/sessions/\(session.session_id).json"
     DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-        try? FileManager.default.removeItem(atPath: sessionFile)
+        if let data = FileManager.default.contents(atPath: sessionFile),
+           var s = try? JSONDecoder().decode(SessionInfo.self, from: data) {
+            s.status = "dead"
+            if let encoded = try? JSONEncoder().encode(s) {
+                let tmp = sessionFile + ".tmp"
+                try? encoded.write(to: URL(fileURLWithPath: tmp))
+                try? FileManager.default.removeItem(atPath: sessionFile)
+                try? FileManager.default.moveItem(atPath: tmp, toPath: sessionFile)
+            }
+        }
     }
 }
 

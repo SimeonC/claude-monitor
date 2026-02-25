@@ -107,7 +107,7 @@ backfill_terminal() {
         "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
-# Helper: remove stale session files for the same terminal tab (different session_id)
+# Helper: mark stale session files for the same terminal tab as dead (different session_id)
 cleanup_same_terminal() {
     [ -z "$TERM_SID" ] && return
     for f in "$SESSIONS_DIR"/*.json; do
@@ -115,19 +115,19 @@ cleanup_same_terminal() {
         local fid
         fid=$(basename "$f" .json)
         [ "$fid" = "$SESSION_ID" ] && continue
-        # Remove if same terminal_session_id
+        # Mark as dead if same terminal_session_id
         if jq -e --arg tid "$TERM_SID" '.terminal_session_id == $tid' "$f" >/dev/null 2>&1; then
-            rm -f "$f"
+            jq '.status = "dead"' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
         fi
     done
 }
 
-# Helper: any non-working status → working when user/tool activity happens
+# Helper: any non-working/non-dead status → working when user/tool activity happens
 set_working() {
     [ -f "$SESSION_FILE" ] || return 0
     jq \
         --arg updated "$NOW" \
-        'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
+        'if .status == "dead" then . elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
         "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
@@ -136,10 +136,10 @@ case "$EVENT" in
     SessionStart)
         cleanup_same_terminal
         if [ -f "$SESSION_FILE" ]; then
-            # Session file exists — backfill terminal and reboot if shutting_down
+            # Session file exists — backfill terminal and reboot if shutting_down/dead
             backfill_terminal
             CURRENT_STATUS=$(jq -r '.status // ""' "$SESSION_FILE")
-            if [ "$CURRENT_STATUS" = "shutting_down" ]; then
+            if [ "$CURRENT_STATUS" = "shutting_down" ] || [ "$CURRENT_STATUS" = "dead" ]; then
                 jq \
                     --arg status "starting" \
                     --arg updated "$NOW" \
@@ -166,7 +166,7 @@ case "$EVENT" in
             jq \
                 --arg status "idle" \
                 --arg updated "$NOW" \
-                '.status = $status | .updated_at = $updated' \
+                'if .status == "dead" then . else .status = $status | .updated_at = $updated end' \
                 "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         fi
         ;;
@@ -179,7 +179,7 @@ case "$EVENT" in
                 jq \
                     --arg status "idle" \
                     --arg updated "$NOW" \
-                    '.status = $status | .updated_at = $updated' \
+                    'if .status == "dead" then . else .status = $status | .updated_at = $updated end' \
                     "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
             fi
             exit 0
@@ -191,7 +191,7 @@ case "$EVENT" in
                 --arg updated "$NOW" \
                 --arg terminal "$TERM_APP" \
                 --arg term_sid "$TERM_SID" \
-                '.status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
+                'if .status == "dead" then . else .status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end end' \
                 "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         fi
         ;;
