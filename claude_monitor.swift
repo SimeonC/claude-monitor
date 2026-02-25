@@ -809,7 +809,7 @@ class SessionReader: ObservableObject {
                 }
 
                 // Update existing session files (don't touch status — hooks own lifecycle).
-                // Create new ones with "starting" for rediscovery after monitor restart.
+                // Only create new files for very fresh JSONLs (monitor restart recovery).
                 let sessionFile = "\(sessionsDir)/\(sessionId).json"
                 if let data = fm.contents(atPath: sessionFile),
                     let existing = try? JSONDecoder().decode(SessionInfo.self, from: data)
@@ -828,8 +828,9 @@ class SessionReader: ObservableObject {
                     updated.agent_count = agentCount
                     updated.updated_at = nowString
                     writeSessionFile(updated, to: sessionFile)
-                } else {
-                    // New file — hooks will transition status on next activity
+                } else if mtime > now.addingTimeInterval(-30) {
+                    // Only create for JSONLs modified in last 30s (recovery after monitor restart).
+                    // Older JSONLs without session files were intentionally cleaned up.
                     let session = SessionInfo(
                         session_id: sessionId, status: "starting",
                         project: project, cwd: cwd,
@@ -872,6 +873,9 @@ class SessionReader: ObservableObject {
             var noInfoSessions: [SessionInfo] = []
 
             for session in currentSessions {
+                // Skip "starting" sessions — they're brand new, may not have JSONL yet
+                if session.status == "starting" && !session.isStale { continue }
+
                 // First try JSONL mtime — most reliable per-session check
                 if let jsonlPath = self.findJSONLPath(sessionId: session.session_id),
                     let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath),
