@@ -1040,12 +1040,14 @@ func switchToGhostty(cwd: String, ttyPath: String) {
     // Normalize CWD for AXDocument comparison (AXDocument is a file URL)
     let cwdNormalized = cwd.hasSuffix("/") ? cwd : cwd + "/"
 
-    // Score by AXDocument: if the file URL contains the session CWD path
-    // Use case-insensitive comparison — macOS filesystem is case-insensitive
-    // but CWD and AXDocument may differ in case (e.g. "Development" vs "development")
-    func scoreDocument(_ doc: String) -> Int {
-        guard !doc.isEmpty else { return 0 }
-        if let url = URL(string: doc), url.scheme == "file" {
+    // Score a window/tab: only consider it if title starts with "tmux"
+    // Then score by AXDocument (CWD match) or title containing basename
+    func scoreWindow(title: String, doc: String) -> Int {
+        let lower = title.lowercased()
+        guard lower.hasPrefix("tmux ") else { return 0 }
+
+        // Prefer AXDocument CWD match
+        if !doc.isEmpty, let url = URL(string: doc), url.scheme == "file" {
             let docPath = url.path.lowercased()
             let docNormalized = docPath.hasSuffix("/") ? docPath : docPath + "/"
             let cwdLower = cwdNormalized.lowercased()
@@ -1053,15 +1055,10 @@ func switchToGhostty(cwd: String, ttyPath: String) {
                 return 30
             }
         }
-        return 0
-    }
 
-    // Score by title: if it contains project folder basename
-    func scoreTitle(_ title: String) -> Int {
-        let lower = title.lowercased()
+        // Fall back to title containing basename
         if lower.contains(basenameLower) {
-            if lower.hasPrefix("tmux ") { return 25 }
-            return 20
+            return 25
         }
         return 0
     }
@@ -1072,10 +1069,7 @@ func switchToGhostty(cwd: String, ttyPath: String) {
         let windowTitle = titleRef as? String ?? ""
         let document = getDocument(window)
 
-        // Compute window-level scores
-        let docScore = scoreDocument(document)
-        let titleScore = scoreTitle(windowTitle)
-        let windowScore = max(docScore, titleScore)
+        let windowScore = scoreWindow(title: windowTitle, doc: document)
 
         // For multi-tab windows, score each tab individually too
         if let tabs = getTabs(window), tabs.count > 1 {
@@ -1085,17 +1079,14 @@ func switchToGhostty(cwd: String, ttyPath: String) {
                 AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &tabTitleRef)
                 let tabTitle = tabTitleRef as? String ?? ""
                 guard !tabTitle.isEmpty else { continue }
-                let tabScore = scoreTitle(tabTitle)
-                // Use best of tab title score and window-level AXDocument score
-                let s = max(tabScore, docScore)
+                let s = scoreWindow(title: tabTitle, doc: document)
                 if s > 0 {
                     candidates.append(Candidate(window: window, tab: tab, title: tabTitle, score: s))
                     hadTabMatch = true
                 }
             }
-            // If AXDocument matched but no individual tab did, add window-level candidate
-            if !hadTabMatch && docScore > 0 {
-                candidates.append(Candidate(window: window, tab: nil, title: windowTitle, score: docScore))
+            if !hadTabMatch && windowScore > 0 {
+                candidates.append(Candidate(window: window, tab: nil, title: windowTitle, score: windowScore))
             }
         } else {
             // Single-tab window
