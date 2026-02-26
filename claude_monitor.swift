@@ -1364,9 +1364,107 @@ struct RefreshButton: View {
     }
 }
 
+struct ShortcutButton: View {
+    @ObservedObject var shortcutManager: ShortcutManager
+    @State private var showPopover = false
+    @State private var isRecording = false
+    @State private var recordingMonitor: Any?
+
+    var body: some View {
+        Button {
+            showPopover.toggle()
+        } label: {
+            Image(systemName: "keyboard")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .popover(isPresented: $showPopover, arrowEdge: .bottom) {
+            VStack(spacing: 10) {
+                Text("Jump Shortcut")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.9))
+
+                Text(isRecording ? "Press keys..." : shortcutManager.displayString)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundColor(isRecording ? .orange : .white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.white.opacity(isRecording ? 0.15 : 0.1))
+                    )
+                    .frame(minWidth: 80)
+
+                HStack(spacing: 8) {
+                    Button(isRecording ? "Cancel" : "Record") {
+                        if isRecording {
+                            stopRecording()
+                        } else {
+                            startRecording()
+                        }
+                    }
+                    .font(.system(size: 11))
+                    .buttonStyle(.plain)
+                    .foregroundColor(.white.opacity(0.8))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.1)))
+
+                    Button("Clear") {
+                        stopRecording()
+                        shortcutManager.clear()
+                    }
+                    .font(.system(size: 11))
+                    .buttonStyle(.plain)
+                    .foregroundColor(.white.opacity(0.6))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.06)))
+                }
+            }
+            .padding(12)
+            .background(Color(nsColor: NSColor(red: 0.129, green: 0.016, blue: 0.314, alpha: 1.0)))
+        }
+        .onChange(of: showPopover) { _, newValue in
+            if !newValue { stopRecording() }
+        }
+    }
+
+    private func startRecording() {
+        isRecording = true
+        // Temporarily remove the shortcut monitors so they don't fire during recording
+        shortcutManager.reinstall()  // will be a no-op if we clear first
+        recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
+            let mask: NSEvent.ModifierFlags = [.control, .shift, .option, .command]
+            let mods = event.modifierFlags.intersection(mask)
+            // Require at least one modifier
+            guard !mods.isEmpty else {
+                if event.keyCode == 53 { // Escape cancels
+                    stopRecording()
+                }
+                return nil
+            }
+            shortcutManager.update(keyCode: event.keyCode, modifierFlags: mods)
+            stopRecording()
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        isRecording = false
+        if let m = recordingMonitor {
+            NSEvent.removeMonitor(m)
+            recordingMonitor = nil
+        }
+    }
+}
+
 struct HeaderBar: View {
     let sessions: [SessionInfo]
     var sessionReader: SessionReader?
+    @ObservedObject var shortcutManager: ShortcutManager
 
     var attentionCount: Int { sessions.filter { $0.status == "attention" }.count }
     var workingCount: Int { sessions.filter { $0.status == "working" }.count }
@@ -1419,6 +1517,7 @@ struct HeaderBar: View {
                     .foregroundColor(.white.opacity(0.4))
                     .fixedSize()
 
+                ShortcutButton(shortcutManager: shortcutManager)
                 RefreshButton(sessionReader: sessionReader)
             }
         }
@@ -1432,13 +1531,15 @@ struct HeaderBar: View {
 struct MonitorContentView: View {
     @ObservedObject var reader: SessionReader
     @ObservedObject var teamReader: TeamReader
+    @ObservedObject var shortcutManager: ShortcutManager
     @State private var isExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
             // Header — always visible, drag to move
             HeaderBar(
-                sessions: reader.sessions, sessionReader: reader)
+                sessions: reader.sessions, sessionReader: reader,
+                shortcutManager: shortcutManager)
 
             if isExpanded && !reader.sessions.isEmpty {
                 Divider()
@@ -1717,6 +1818,107 @@ struct WindowDragHandle: NSViewRepresentable {
     }
 }
 
+// MARK: - Shortcut Manager
+
+class ShortcutManager: ObservableObject {
+    @Published var keyCode: UInt16
+    @Published var modifierFlags: NSEvent.ModifierFlags
+
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
+    private let onTrigger: () -> Void
+
+    init(onTrigger: @escaping () -> Void) {
+        self.onTrigger = onTrigger
+        self.keyCode = UInt16(UserDefaults.standard.integer(forKey: "shortcutKeyCode"))
+        let storedMods = UserDefaults.standard.object(forKey: "shortcutModifierFlags") as? UInt
+        if let storedMods = storedMods {
+            self.modifierFlags = NSEvent.ModifierFlags(rawValue: storedMods)
+        } else {
+            // Default: Ctrl+Shift+A
+            self.keyCode = 0  // 'A'
+            self.modifierFlags = [.control, .shift]
+        }
+        install()
+    }
+
+    var isEnabled: Bool { keyCode != UInt16.max }
+
+    func update(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) {
+        self.keyCode = keyCode
+        self.modifierFlags = modifierFlags
+        UserDefaults.standard.set(Int(keyCode), forKey: "shortcutKeyCode")
+        UserDefaults.standard.set(modifierFlags.rawValue, forKey: "shortcutModifierFlags")
+        reinstall()
+    }
+
+    func clear() {
+        self.keyCode = UInt16.max
+        self.modifierFlags = []
+        UserDefaults.standard.set(Int(UInt16.max), forKey: "shortcutKeyCode")
+        UserDefaults.standard.set(0, forKey: "shortcutModifierFlags")
+        reinstall()
+    }
+
+    private func matches(_ event: NSEvent) -> Bool {
+        guard isEnabled else { return false }
+        let mask: NSEvent.ModifierFlags = [.control, .shift, .option, .command]
+        return event.keyCode == keyCode && event.modifierFlags.intersection(mask) == modifierFlags.intersection(mask)
+    }
+
+    func install() {
+        guard isEnabled else { return }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if self?.matches(event) == true { self?.onTrigger() }
+        }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if self?.matches(event) == true {
+                self?.onTrigger()
+                return nil
+            }
+            return event
+        }
+    }
+
+    func reinstall() {
+        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        if let m = localMonitor { NSEvent.removeMonitor(m) }
+        globalMonitor = nil
+        localMonitor = nil
+        install()
+    }
+
+    var displayString: String {
+        guard isEnabled else { return "None" }
+        var parts: [String] = []
+        if modifierFlags.contains(.control) { parts.append("⌃") }
+        if modifierFlags.contains(.option) { parts.append("⌥") }
+        if modifierFlags.contains(.shift) { parts.append("⇧") }
+        if modifierFlags.contains(.command) { parts.append("⌘") }
+
+        let keyNames: [UInt16: String] = [
+            0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X", 8: "C", 9: "V",
+            11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y", 17: "T",
+            18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5", 24: "=", 25: "9", 26: "7",
+            27: "-", 28: "8", 29: "0", 30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P",
+            37: "L", 38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",", 44: "/",
+            45: "N", 46: "M", 47: ".",
+            36: "↩", 48: "⇥", 49: "Space", 51: "⌫", 53: "⎋",
+            96: "F5", 97: "F6", 98: "F7", 99: "F3", 100: "F8",
+            101: "F9", 103: "F11", 105: "F13", 109: "F10", 111: "F12",
+            118: "F4", 120: "F2", 122: "F1",
+            123: "←", 124: "→", 125: "↓", 126: "↑",
+        ]
+        parts.append(keyNames[keyCode] ?? "Key\(keyCode)")
+        return parts.joined()
+    }
+
+    deinit {
+        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        if let m = localMonitor { NSEvent.removeMonitor(m) }
+    }
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1724,15 +1926,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let reader = SessionReader()
     let teamReader = TeamReader()
     var sizeObserver: AnyCancellable?
+    var shortcutManager: ShortcutManager!
+    var lastJumpedSessionId: String?
+
+    func jumpToNextSession() {
+        let sessions = reader.sessions
+        guard !sessions.isEmpty else { return }
+
+        let attentionSessions = sessions.filter { $0.status == "attention" }
+        let startIndex: Int
+        if let lastId = lastJumpedSessionId,
+           let idx = sessions.firstIndex(where: { $0.session_id == lastId }) {
+            startIndex = idx
+        } else {
+            startIndex = sessions.count - 1  // so wrapping starts at 0
+        }
+
+        let useAttention = attentionSessions.count > 1
+            || (attentionSessions.count == 1 && lastJumpedSessionId != attentionSessions[0].session_id)
+
+        for offset in 1...sessions.count {
+            let idx = (startIndex + offset) % sessions.count
+            let candidate = sessions[idx]
+            if useAttention {
+                if candidate.status == "attention" {
+                    switchToSession(candidate)
+                    lastJumpedSessionId = candidate.session_id
+                    return
+                }
+            } else {
+                switchToSession(candidate)
+                lastJumpedSessionId = candidate.session_id
+                return
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        shortcutManager = ShortcutManager { [weak self] in
+            DispatchQueue.main.async { self?.jumpToNextSession() }
+        }
 
         panel = FloatingPanel()
 
         let hostingView = ClickHostingView(
             rootView: MonitorContentView(
-                reader: reader, teamReader: teamReader)
+                reader: reader, teamReader: teamReader, shortcutManager: shortcutManager)
         )
         hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: 40))
         hostingView.wantsLayer = true
