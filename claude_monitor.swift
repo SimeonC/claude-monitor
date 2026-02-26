@@ -1574,7 +1574,7 @@ struct RefreshButton: View {
 struct ShortcutButton: View {
     @ObservedObject var shortcutManager: ShortcutManager
     @State private var showPopover = false
-    @State private var isRecording = false
+    @State private var recordingSlot: Int?  // nil = not recording, 1 or 2
     @State private var recordingMonitor: Any?
 
     var body: some View {
@@ -1588,85 +1588,113 @@ struct ShortcutButton: View {
         .buttonStyle(.plain)
         .focusable(false)
         .popover(isPresented: $showPopover, arrowEdge: .bottom) {
-            VStack(spacing: 10) {
-                Text("Jump Shortcut")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.9))
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Jump Shortcuts")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
 
-                Text(isRecording ? "Press keys..." : shortcutManager.displayString)
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
-                    .foregroundColor(isRecording ? .orange : .white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.white.opacity(isRecording ? 0.15 : 0.1))
-                    )
-                    .frame(minWidth: 80)
+                    Text("Either shortcut will cycle between sessions")
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.5))
+                }
 
-                HStack(spacing: 8) {
-                    Button(isRecording ? "Cancel" : "Record") {
-                        if isRecording {
-                            stopRecording()
-                        } else {
-                            startRecording()
-                        }
-                    }
-                    .font(.system(size: 11))
-                    .buttonStyle(.plain)
-                    .foregroundColor(.white.opacity(0.8))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.1)))
+                VStack(alignment: .leading, spacing: 8) {
+                    shortcutRow(slot: 1,
+                                display: shortcutManager.displayString,
+                                onClear: { shortcutManager.clear() })
 
-                    Button("Clear") {
-                        stopRecording()
-                        shortcutManager.clear()
-                    }
-                    .font(.system(size: 11))
-                    .buttonStyle(.plain)
-                    .foregroundColor(.white.opacity(0.6))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.06)))
+                    shortcutRow(slot: 2,
+                                display: shortcutManager.displayString2,
+                                onClear: { shortcutManager.clear2() })
                 }
             }
-            .padding(12)
-            .background(Color(nsColor: NSColor(red: 0.129, green: 0.016, blue: 0.314, alpha: 1.0)))
+            .padding(14)
+            .background(Color(nsColor: NSColor(red: 0.22, green: 0.10, blue: 0.42, alpha: 1.0)))
         }
         .onChange(of: showPopover) { _, newValue in
             if !newValue { stopRecording() }
         }
     }
 
-    private func startRecording() {
-        isRecording = true
-        // Temporarily remove the shortcut monitors so they don't fire during recording
+    @ViewBuilder
+    private func shortcutRow(slot: Int, display: String, onClear: @escaping () -> Void) -> some View {
+        let isThisSlotRecording = recordingSlot == slot
+        HStack(spacing: 8) {
+            // Shortcut display doubles as Record button
+            Button {
+                if isThisSlotRecording {
+                    stopRecording()
+                } else {
+                    startRecording(slot: slot)
+                }
+            } label: {
+                Text(isThisSlotRecording ? "Press keys…" : display)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundColor(isThisSlotRecording ? .orange : .white.opacity(0.9))
+                    .frame(minWidth: 90)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.white.opacity(isThisSlotRecording ? 0.18 : 0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(Color.white.opacity(isThisSlotRecording ? 0.3 : 0.12), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+
+            // Clear (or Cancel when recording)
+            Button {
+                if isThisSlotRecording {
+                    stopRecording()
+                } else {
+                    stopRecording()
+                    onClear()
+                }
+            } label: {
+                Text(isThisSlotRecording ? "Cancel" : "Clear")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(isThisSlotRecording ? 0.7 : 0.4))
+                    .fixedSize()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+        }
+    }
+
+    private func startRecording(slot: Int) {
+        stopRecording()  // cancel any active recording first
+        recordingSlot = slot
         shortcutManager.uninstall()
-        if let m = recordingMonitor { NSEvent.removeMonitor(m); recordingMonitor = nil }
         recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
             let mask: NSEvent.ModifierFlags = [.control, .shift, .option, .command]
             let mods = event.modifierFlags.intersection(mask)
-            // Require at least one modifier
             guard !mods.isEmpty else {
-                if event.keyCode == 53 { // Escape cancels
-                    stopRecording()
-                }
+                if event.keyCode == 53 { stopRecording() }
                 return nil
             }
-            shortcutManager.update(keyCode: event.keyCode, modifierFlags: mods)
+            if slot == 1 {
+                shortcutManager.update(keyCode: event.keyCode, modifierFlags: mods)
+            } else {
+                shortcutManager.update2(keyCode: event.keyCode, modifierFlags: mods)
+            }
             stopRecording()
             return nil
         }
     }
 
     private func stopRecording() {
-        isRecording = false
+        recordingSlot = nil
         if let m = recordingMonitor {
             NSEvent.removeMonitor(m)
             recordingMonitor = nil
         }
-        // Re-enable the shortcut monitors after recording ends
         shortcutManager.install()
     }
 }
@@ -2036,12 +2064,28 @@ struct WindowDragHandle: NSViewRepresentable {
 class ShortcutManager: ObservableObject {
     @Published var keyCode: UInt16
     @Published var modifierFlags: NSEvent.ModifierFlags
+    @Published var keyCode2: UInt16
+    @Published var modifierFlags2: NSEvent.ModifierFlags
 
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private let onTrigger: () -> Void
 
     private var accessibilityTimer: Timer?
+
+    private static let keyNames: [UInt16: String] = [
+        0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X", 8: "C", 9: "V",
+        11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y", 17: "T",
+        18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5", 24: "=", 25: "9", 26: "7",
+        27: "-", 28: "8", 29: "0", 30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P",
+        37: "L", 38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",", 44: "/",
+        45: "N", 46: "M", 47: ".",
+        36: "↩", 48: "⇥", 49: "Space", 51: "⌫", 53: "⎋",
+        96: "F5", 97: "F6", 98: "F7", 99: "F3", 100: "F8",
+        101: "F9", 103: "F11", 105: "F13", 109: "F10", 111: "F12",
+        118: "F4", 120: "F2", 122: "F1",
+        123: "←", 124: "→", 125: "↓", 126: "↑",
+    ]
 
     init(onTrigger: @escaping () -> Void) {
         self.onTrigger = onTrigger
@@ -2053,6 +2097,16 @@ class ShortcutManager: ObservableObject {
             // Default: Ctrl+Shift+A
             self.keyCode = 0  // 'A'
             self.modifierFlags = [.control, .shift]
+        }
+        // Shortcut 2: no default
+        let storedCode2 = UserDefaults.standard.object(forKey: "shortcutKeyCode2") as? Int
+        if let storedCode2 = storedCode2 {
+            self.keyCode2 = UInt16(storedCode2)
+            let storedMods2 = UserDefaults.standard.object(forKey: "shortcutModifierFlags2") as? UInt
+            self.modifierFlags2 = NSEvent.ModifierFlags(rawValue: storedMods2 ?? 0)
+        } else {
+            self.keyCode2 = UInt16.max
+            self.modifierFlags2 = []
         }
         // Defer monitor installation until the run loop is active so global
         // event monitors work immediately in .accessory apps.
@@ -2080,12 +2134,21 @@ class ShortcutManager: ObservableObject {
     }
 
     var isEnabled: Bool { keyCode != UInt16.max }
+    var isEnabled2: Bool { keyCode2 != UInt16.max }
 
     func update(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) {
         self.keyCode = keyCode
         self.modifierFlags = modifierFlags
         UserDefaults.standard.set(Int(keyCode), forKey: "shortcutKeyCode")
         UserDefaults.standard.set(modifierFlags.rawValue, forKey: "shortcutModifierFlags")
+        reinstall()
+    }
+
+    func update2(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) {
+        self.keyCode2 = keyCode
+        self.modifierFlags2 = modifierFlags
+        UserDefaults.standard.set(Int(keyCode), forKey: "shortcutKeyCode2")
+        UserDefaults.standard.set(modifierFlags.rawValue, forKey: "shortcutModifierFlags2")
         reinstall()
     }
 
@@ -2097,15 +2160,29 @@ class ShortcutManager: ObservableObject {
         reinstall()
     }
 
+    func clear2() {
+        self.keyCode2 = UInt16.max
+        self.modifierFlags2 = []
+        UserDefaults.standard.set(Int(UInt16.max), forKey: "shortcutKeyCode2")
+        UserDefaults.standard.set(0, forKey: "shortcutModifierFlags2")
+        reinstall()
+    }
+
     private func matches(_ event: NSEvent) -> Bool {
-        guard isEnabled else { return false }
         let mask: NSEvent.ModifierFlags = [.control, .shift, .option, .command]
-        return event.keyCode == keyCode && event.modifierFlags.intersection(mask) == modifierFlags.intersection(mask)
+        let eventMods = event.modifierFlags.intersection(mask)
+        if isEnabled && event.keyCode == keyCode && eventMods == modifierFlags.intersection(mask) {
+            return true
+        }
+        if isEnabled2 && event.keyCode == keyCode2 && eventMods == modifierFlags2.intersection(mask) {
+            return true
+        }
+        return false
     }
 
     func install() {
         uninstall()
-        guard isEnabled else { return }
+        guard isEnabled || isEnabled2 else { return }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if self?.matches(event) == true { self?.onTrigger() }
         }
@@ -2130,29 +2207,24 @@ class ShortcutManager: ObservableObject {
         install()
     }
 
-    var displayString: String {
-        guard isEnabled else { return "None" }
+    private static func formatShortcut(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> String {
         var parts: [String] = []
         if modifierFlags.contains(.control) { parts.append("⌃") }
         if modifierFlags.contains(.option) { parts.append("⌥") }
         if modifierFlags.contains(.shift) { parts.append("⇧") }
         if modifierFlags.contains(.command) { parts.append("⌘") }
-
-        let keyNames: [UInt16: String] = [
-            0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X", 8: "C", 9: "V",
-            11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y", 17: "T",
-            18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5", 24: "=", 25: "9", 26: "7",
-            27: "-", 28: "8", 29: "0", 30: "]", 31: "O", 32: "U", 33: "[", 34: "I", 35: "P",
-            37: "L", 38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",", 44: "/",
-            45: "N", 46: "M", 47: ".",
-            36: "↩", 48: "⇥", 49: "Space", 51: "⌫", 53: "⎋",
-            96: "F5", 97: "F6", 98: "F7", 99: "F3", 100: "F8",
-            101: "F9", 103: "F11", 105: "F13", 109: "F10", 111: "F12",
-            118: "F4", 120: "F2", 122: "F1",
-            123: "←", 124: "→", 125: "↓", 126: "↑",
-        ]
         parts.append(keyNames[keyCode] ?? "Key\(keyCode)")
         return parts.joined()
+    }
+
+    var displayString: String {
+        guard isEnabled else { return "None" }
+        return Self.formatShortcut(keyCode: keyCode, modifierFlags: modifierFlags)
+    }
+
+    var displayString2: String {
+        guard isEnabled2 else { return "None" }
+        return Self.formatShortcut(keyCode: keyCode2, modifierFlags: modifierFlags2)
     }
 
     deinit {
