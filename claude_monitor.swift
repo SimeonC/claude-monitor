@@ -289,6 +289,10 @@ class SessionReader: ObservableObject {
     private var lastStableSession: [String: SessionInfo] = [:]
     /// When a transient status (shutting_down/starting) was first seen, for grace period timing
     private var transientSince: [String: Date] = [:]
+    /// Sessions hidden by user via X button; auto-unhidden when session's updated_at changes
+    private var hiddenSessionIds: Set<String> = []
+    /// The updated_at value at the time the session was hidden (to detect activity)
+    private var hiddenAtUpdatedAt: [String: String] = [:]
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -759,6 +763,14 @@ class SessionReader: ObservableObject {
         } catch { return nil }
     }
 
+    /// Hide a session from the UI. It will reappear if its updated_at changes (new activity).
+    func hideSession(_ id: String, updatedAt: String) {
+        hiddenSessionIds.insert(id)
+        hiddenAtUpdatedAt[id] = updatedAt
+        // Immediately remove from published list
+        sessions.removeAll { $0.session_id == id }
+    }
+
     func readSessions() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else {
@@ -924,6 +936,17 @@ class SessionReader: ObservableObject {
             NSLog("[ClaudeMonitor]   → representative: sid=%@ status=%@ terminal=%@ tty=%@ cwd=%@", merged.session_id, merged.status, merged.terminal, merged.terminal_session_id, merged.cwd)
             aggregated.append(merged)
         }
+
+        // Unhide sessions whose updated_at changed (new activity since hide)
+        for s in aggregated {
+            if let hiddenUpdatedAt = hiddenAtUpdatedAt[s.session_id],
+               s.updated_at != hiddenUpdatedAt {
+                hiddenSessionIds.remove(s.session_id)
+                hiddenAtUpdatedAt.removeValue(forKey: s.session_id)
+            }
+        }
+        // Filter out hidden sessions
+        aggregated.removeAll { hiddenSessionIds.contains($0.session_id) }
 
         // Sort alphabetically by project name for stable ordering
         aggregated.sort {
@@ -1313,63 +1336,6 @@ func switchByTerminalCwd(cwd: String) {
     }
 }
 
-// MARK: - Session Killer
-
-func killSession(_ session: SessionInfo) {
-    var ttyName: String?
-
-    if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
-        ttyName = session.terminal_session_id.replacingOccurrences(of: "/dev/", with: "")
-    } else if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
-        let parts = session.terminal_session_id.split(separator: ":")
-        if parts.count >= 2 {
-            let uniqueId = String(parts[1])
-            let script = """
-                tell application "iTerm2"
-                    repeat with w in windows
-                        repeat with t in tabs of w
-                            repeat with s in sessions of t
-                                if unique id of s is "\(uniqueId)" then
-                                    return tty of s
-                                end if
-                            end repeat
-                        end repeat
-                    end repeat
-                end tell
-                """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                let result = appleScript.executeAndReturnError(&error)
-                if let tty = result.stringValue {
-                    ttyName = tty.replacingOccurrences(of: "/dev/", with: "")
-                }
-            }
-        }
-    }
-
-    if let tty = ttyName {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", "pkill -TERM -t \(tty) -f claude 2>/dev/null"]
-        try? task.run()
-    }
-
-    // Mark session as dead after delay
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    let sessionFile = "\(home)/.claude/monitor/sessions/\(session.session_id).json"
-    DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-        if let data = FileManager.default.contents(atPath: sessionFile),
-           var s = try? JSONDecoder().decode(SessionInfo.self, from: data) {
-            s.status = "dead"
-            if let encoded = try? JSONEncoder().encode(s) {
-                let tmp = sessionFile + ".tmp"
-                try? encoded.write(to: URL(fileURLWithPath: tmp))
-                rename(tmp, sessionFile)
-            }
-        }
-    }
-}
-
 // MARK: - Pulsing Dot View
 
 struct PulsingDot: View {
@@ -1411,9 +1377,8 @@ struct SessionRowView: View {
     let session: SessionInfo
     var teamInfo: TeamInfo? = nil
     var isActive: Bool = false
-    var onKill: (() -> Void)? = nil
+    var onHide: (() -> Void)? = nil
     @State private var isHovered = false
-    @State private var isKilling = false
     @State private var badgeScale: CGFloat = 1.0
 
     private var badgeCount: Int {
@@ -1499,24 +1464,17 @@ struct SessionRowView: View {
                         )
                         .fixedSize()
                         .overlay(alignment: .leading) {
-                            if onKill != nil {
-                                ZStack {
-                                    if isKilling {
-                                        PulsingDot(color: .red, isPulsing: true)
-                                    } else if isHovered {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 10, weight: .semibold))
-                                            .foregroundColor(.white.opacity(0.4))
-                                            .overlay(
-                                                FirstMouseClickArea {
-                                                    isKilling = true
-                                                    onKill?()
-                                                }
-                                            )
-                                    }
-                                }
-                                .frame(width: 20, height: 20)
-                                .offset(x: -24)
+                            if onHide != nil && isHovered {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.4))
+                                    .overlay(
+                                        FirstMouseClickArea {
+                                            onHide?()
+                                        }
+                                    )
+                                    .frame(width: 20, height: 20)
+                                    .offset(x: -24)
                             }
                         }
                 }
@@ -1794,7 +1752,7 @@ struct MonitorContentView: View {
                                 session: session,
                                 teamInfo: teamReader.teamsBySession[session.session_id],
                                 isActive: session.session_id == activeTracker.activeSessionId,
-                                onKill: { killSession(session) }
+                                onHide: { reader.hideSession(session.session_id, updatedAt: session.updated_at) }
                             )
                             .overlay(
                                 FirstMouseClickArea {
