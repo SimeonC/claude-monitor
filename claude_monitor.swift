@@ -2206,11 +2206,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if candidate.status == "attention" {
                     switchToSession(candidate)
                     lastJumpedSessionId = candidate.session_id
+                    activeTracker.activeSessionId = candidate.session_id
                     return
                 }
             } else {
                 switchToSession(candidate)
                 lastJumpedSessionId = candidate.session_id
+                activeTracker.activeSessionId = candidate.session_id
                 return
             }
         }
