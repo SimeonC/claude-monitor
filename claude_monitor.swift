@@ -1756,8 +1756,11 @@ struct HeaderBar: View {
                     .fixedSize()
 
                 ShortcutButton(shortcutManager: shortcutManager)
+                    .fixedSize()
                 RefreshButton(sessionReader: sessionReader)
+                    .fixedSize()
             }
+            .layoutPriority(1)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
