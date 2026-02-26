@@ -1657,6 +1657,7 @@ struct ShortcutButton: View {
         isRecording = true
         // Temporarily remove the shortcut monitors so they don't fire during recording
         shortcutManager.uninstall()
+        if let m = recordingMonitor { NSEvent.removeMonitor(m); recordingMonitor = nil }
         recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
             let mask: NSEvent.ModifierFlags = [.control, .shift, .option, .command]
             let mods = event.modifierFlags.intersection(mask)
@@ -2116,6 +2117,7 @@ class ShortcutManager: ObservableObject {
     }
 
     func install() {
+        uninstall()
         guard isEnabled else { return }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if self?.matches(event) == true { self?.onTrigger() }
