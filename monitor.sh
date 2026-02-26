@@ -122,13 +122,13 @@ cleanup_same_terminal() {
     done
 }
 
-# Helper: any non-working/non-dead/non-attention status → working when user/tool activity happens
-# Preserves "attention" — only idle_prompt/Stop events should clear it.
+# Helper: any non-dead status → working when user/tool activity happens.
+# PreToolUse fires after the user approves a permission prompt, so this clears attention.
 set_working() {
     [ -f "$SESSION_FILE" ] || return 0
     jq \
         --arg updated "$NOW" \
-        'if .status == "dead" or .status == "attention" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
+        'if .status == "dead" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
         "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
@@ -223,7 +223,7 @@ case "$EVENT" in
 
     *)
         # All other events (PreToolUse, etc.):
-        # Backfill terminal info and set working (preserves attention — see set_working)
+        # Backfill terminal info and set working (clears attention — PreToolUse means user approved)
         backfill_terminal
         set_working
         ;;
