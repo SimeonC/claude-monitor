@@ -281,7 +281,7 @@ struct SessionInfo: Codable, Identifiable {
 class SessionReader: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     private var livenessTimer: Timer?
-    private var dirSource: DispatchSourceFileSystemObject?
+    private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
 
     private let sessionsDir: String = {
@@ -300,20 +300,11 @@ class SessionReader: ObservableObject {
         scanProjects()
         readSessions()
 
-        // FSEvents: instant reload when session files change
-        let fd = open(sessionsDir, O_EVTONLY)
-        if fd >= 0 {
-            let source = DispatchSource.makeFileSystemObjectSource(
-                fileDescriptor: fd,
-                eventMask: [.write, .delete, .rename, .extend],
-                queue: .main
-            )
-            source.setEventHandler { [weak self] in
+        // FSEvents: reload when session files change (1s coalescing to avoid flicker)
+        dirSource = DirectoryWatcher(paths: [sessionsDir], latency: 1.0) { [weak self] in
+            DispatchQueue.main.async {
                 self?.readSessions()
             }
-            source.setCancelHandler { close(fd) }
-            source.resume()
-            dirSource = source
         }
 
         // FSEvents on projects dir: detect new/changed JSONL files
