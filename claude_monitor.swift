@@ -283,6 +283,10 @@ class SessionReader: ObservableObject {
     private var livenessTimer: Timer?
     private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
+    /// Last known stable status per session (working/idle/attention) for suppressing transient flicker
+    private var lastStableStatus: [String: String] = [:]
+    /// When a transient status (shutting_down/starting) was first seen, for grace period timing
+    private var transientSince: [String: Date] = [:]
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -787,6 +791,33 @@ class SessionReader: ObservableObject {
             }
         }
 
+        // Stabilize transient statuses to prevent flicker during plan mode exit.
+        // Plan mode exit fires SessionEnd → SessionStart → tool hooks in rapid succession,
+        // causing brief "shutting_down" → "starting" → "working" transitions.
+        // Suppress transient states for 3s if the session was previously in a stable state.
+        let stableStatuses: Set<String> = ["working", "idle", "attention"]
+        let transientStatuses: Set<String> = ["shutting_down", "starting"]
+        let now = Date()
+        for i in loaded.indices {
+            let sid = loaded[i].session_id
+            if stableStatuses.contains(loaded[i].status) {
+                lastStableStatus[sid] = loaded[i].status
+                transientSince.removeValue(forKey: sid)
+            } else if transientStatuses.contains(loaded[i].status),
+                      let prev = lastStableStatus[sid] {
+                if transientSince[sid] == nil {
+                    transientSince[sid] = now
+                }
+                if now.timeIntervalSince(transientSince[sid]!) < 3.0 {
+                    loaded[i].status = prev
+                }
+            }
+        }
+        // Clean up tracking for sessions no longer present
+        let loadedIds = Set(loaded.map(\.session_id))
+        lastStableStatus = lastStableStatus.filter { loadedIds.contains($0.key) }
+        transientSince = transientSince.filter { loadedIds.contains($0.key) }
+
         // Aggregate sessions with the same project name
         let statusPriority: [String: Int] = [
             "working": 0, "attention": 1, "idle": 2, "shutting_down": 3, "starting": 4,
@@ -893,6 +924,161 @@ class SessionReader: ObservableObject {
 
 }
 
+// MARK: - Active Session Tracker
+
+class ActiveSessionTracker: ObservableObject {
+    @Published var activeSessionId: String?
+    private weak var sessionReader: SessionReader?
+    private var pollTimer: Timer?
+    private var workspaceObserver: Any?
+    private let backgroundQueue = DispatchQueue(label: "com.claudemonitor.activesession", qos: .utility)
+
+    private let terminalBundleIds: Set<String> = [
+        "com.mitchellh.ghostty",
+        "com.googlecode.iterm2",
+        "com.apple.Terminal",
+    ]
+
+    init(sessionReader: SessionReader) {
+        self.sessionReader = sessionReader
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleAppActivation(notification)
+        }
+        // Check current app on init
+        if let app = NSWorkspace.shared.frontmostApplication,
+           let bundleId = app.bundleIdentifier,
+           terminalBundleIds.contains(bundleId) {
+            startPolling()
+        }
+    }
+
+    deinit {
+        if let obs = workspaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
+        }
+        pollTimer?.invalidate()
+    }
+
+    private func handleAppActivation(_ notification: Notification) {
+        guard let app = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication),
+              let bundleId = app.bundleIdentifier else {
+            stopPolling()
+            return
+        }
+        if terminalBundleIds.contains(bundleId) {
+            startPolling()
+        } else {
+            stopPolling()
+        }
+    }
+
+    private func startPolling() {
+        detectActiveSession()  // immediate first check
+        guard pollTimer == nil else { return }
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.detectActiveSession()
+        }
+    }
+
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        if activeSessionId != nil {
+            activeSessionId = nil
+        }
+    }
+
+    private func detectActiveSession() {
+        guard let sessions = sessionReader?.sessions, !sessions.isEmpty else { return }
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              let bundleId = app.bundleIdentifier else { return }
+
+        if bundleId == "com.mitchellh.ghostty" {
+            detectGhosttySession(app: app, sessions: sessions)
+        } else if bundleId == "com.googlecode.iterm2" {
+            detectITerm2Session(sessions: sessions)
+        } else if bundleId == "com.apple.Terminal" {
+            detectTerminalSession(sessions: sessions)
+        }
+    }
+
+    private func detectGhosttySession(app: NSRunningApplication, sessions: [SessionInfo]) {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedRef) == .success,
+              let focusedWindow = focusedRef else {
+            DispatchQueue.main.async { self.activeSessionId = nil }
+            return
+        }
+        let window = focusedWindow as! AXUIElement
+
+        var titleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+        let title = titleRef as? String ?? ""
+
+        var docRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &docRef)
+        let doc = docRef as? String ?? ""
+
+        var bestId: String? = nil
+        var bestScore = 0
+        for session in sessions {
+            let score = scoreGhosttyWindow(title: title, doc: doc, cwd: session.cwd)
+            if score > bestScore {
+                bestScore = score
+                bestId = session.session_id
+            }
+        }
+        DispatchQueue.main.async { self.activeSessionId = bestId }
+    }
+
+    private func detectITerm2Session(sessions: [SessionInfo]) {
+        let script = """
+            tell application "iTerm2"
+                get unique id of current session of current tab of current window
+            end tell
+            """
+        backgroundQueue.async { [weak self] in
+            guard let appleScript = NSAppleScript(source: script) else { return }
+            var error: NSDictionary?
+            let result = appleScript.executeAndReturnError(&error)
+            guard error == nil, let guid = result.stringValue else {
+                DispatchQueue.main.async { self?.activeSessionId = nil }
+                return
+            }
+            let matched = sessions.first { session in
+                // terminal_session_id format: "w0t0p0:GUID"
+                let parts = session.terminal_session_id.split(separator: ":")
+                return parts.count >= 2 && String(parts[1]) == guid
+            }
+            DispatchQueue.main.async { self?.activeSessionId = matched?.session_id }
+        }
+    }
+
+    private func detectTerminalSession(sessions: [SessionInfo]) {
+        let script = """
+            tell application "Terminal"
+                get tty of selected tab of front window
+            end tell
+            """
+        backgroundQueue.async { [weak self] in
+            guard let appleScript = NSAppleScript(source: script) else { return }
+            var error: NSDictionary?
+            let result = appleScript.executeAndReturnError(&error)
+            guard error == nil, let tty = result.stringValue else {
+                DispatchQueue.main.async { self?.activeSessionId = nil }
+                return
+            }
+            let matched = sessions.first { $0.terminal_session_id == tty }
+            DispatchQueue.main.async { self?.activeSessionId = matched?.session_id }
+        }
+    }
+}
+
 // MARK: - Terminal Switcher
 
 func switchToSession(_ session: SessionInfo) {
@@ -969,6 +1155,32 @@ func switchToTerminal(ttyPath: String) {
     }
 }
 
+/// Score a Ghostty window/tab title + AXDocument against a target CWD.
+/// Returns 0 (no match), 25 (title contains basename), or 30 (AXDocument CWD match).
+/// Only considers windows whose title starts with "tmux ".
+func scoreGhosttyWindow(title: String, doc: String, cwd: String) -> Int {
+    let lower = title.lowercased()
+    guard lower.hasPrefix("tmux ") else { return 0 }
+
+    let cwdNormalized = (cwd.hasSuffix("/") ? cwd : cwd + "/").lowercased()
+
+    // Prefer AXDocument CWD match
+    if !doc.isEmpty, let url = URL(string: doc), url.scheme == "file" {
+        let docPath = url.path.lowercased()
+        let docNormalized = docPath.hasSuffix("/") ? docPath : docPath + "/"
+        if docNormalized == cwdNormalized || docNormalized.hasPrefix(cwdNormalized) {
+            return 30
+        }
+    }
+
+    // Fall back to title containing basename
+    let basename = (cwd as NSString).lastPathComponent.lowercased()
+    if lower.contains(basename) {
+        return 25
+    }
+    return 0
+}
+
 func switchToGhostty(cwd: String, ttyPath: String) {
     let basename = (cwd as NSString).lastPathComponent
 
@@ -1027,32 +1239,6 @@ func switchToGhostty(cwd: String, ttyPath: String) {
     }
 
     var candidates: [Candidate] = []
-    let basenameLower = basename.lowercased()
-    // Normalize CWD for AXDocument comparison (AXDocument is a file URL)
-    let cwdNormalized = cwd.hasSuffix("/") ? cwd : cwd + "/"
-
-    // Score a window/tab: only consider it if title starts with "tmux"
-    // Then score by AXDocument (CWD match) or title containing basename
-    func scoreWindow(title: String, doc: String) -> Int {
-        let lower = title.lowercased()
-        guard lower.hasPrefix("tmux ") else { return 0 }
-
-        // Prefer AXDocument CWD match
-        if !doc.isEmpty, let url = URL(string: doc), url.scheme == "file" {
-            let docPath = url.path.lowercased()
-            let docNormalized = docPath.hasSuffix("/") ? docPath : docPath + "/"
-            let cwdLower = cwdNormalized.lowercased()
-            if docNormalized == cwdLower || docNormalized.hasPrefix(cwdLower) {
-                return 30
-            }
-        }
-
-        // Fall back to title containing basename
-        if lower.contains(basenameLower) {
-            return 25
-        }
-        return 0
-    }
 
     for window in windows {
         var titleRef: CFTypeRef?
@@ -1060,7 +1246,7 @@ func switchToGhostty(cwd: String, ttyPath: String) {
         let windowTitle = titleRef as? String ?? ""
         let document = getDocument(window)
 
-        let windowScore = scoreWindow(title: windowTitle, doc: document)
+        let windowScore = scoreGhosttyWindow(title: windowTitle, doc: document, cwd: cwd)
 
         // For multi-tab windows, score each tab individually too
         if let tabs = getTabs(window), tabs.count > 1 {
@@ -1070,7 +1256,7 @@ func switchToGhostty(cwd: String, ttyPath: String) {
                 AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &tabTitleRef)
                 let tabTitle = tabTitleRef as? String ?? ""
                 guard !tabTitle.isEmpty else { continue }
-                let s = scoreWindow(title: tabTitle, doc: document)
+                let s = scoreGhosttyWindow(title: tabTitle, doc: document, cwd: cwd)
                 if s > 0 {
                     candidates.append(Candidate(window: window, tab: tab, title: tabTitle, score: s))
                     hadTabMatch = true
@@ -1211,6 +1397,7 @@ struct PulsingDot: View {
 struct SessionRowView: View {
     let session: SessionInfo
     var teamInfo: TeamInfo? = nil
+    var isActive: Bool = false
     var onKill: (() -> Void)? = nil
     @State private var isHovered = false
     @State private var isKilling = false
@@ -1224,8 +1411,14 @@ struct SessionRowView: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Color.clear.frame(width: 0, height: 0)
+        HStack(alignment: .top, spacing: 0) {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(Color(red: 45/255, green: 191/255, blue: 230/255).opacity(isActive ? 0.8 : 0))
+                .frame(width: 3)
+                .padding(.vertical, 4)
+                .animation(.easeInOut(duration: 0.2), value: isActive)
+
+            Spacer().frame(width: 6)
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
@@ -1333,7 +1526,8 @@ struct SessionRowView: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, 6)
+        .padding(.trailing, 12)
         .padding(.top, 0)
         .padding(.bottom, 8)
         .onHover { isHovered = $0 }
@@ -1435,7 +1629,7 @@ struct ShortcutButton: View {
     private func startRecording() {
         isRecording = true
         // Temporarily remove the shortcut monitors so they don't fire during recording
-        shortcutManager.reinstall()  // will be a no-op if we clear first
+        shortcutManager.uninstall()
         recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
             let mask: NSEvent.ModifierFlags = [.control, .shift, .option, .command]
             let mods = event.modifierFlags.intersection(mask)
@@ -1458,6 +1652,8 @@ struct ShortcutButton: View {
             NSEvent.removeMonitor(m)
             recordingMonitor = nil
         }
+        // Re-enable the shortcut monitors after recording ends
+        shortcutManager.install()
     }
 }
 
@@ -1532,6 +1728,7 @@ struct MonitorContentView: View {
     @ObservedObject var reader: SessionReader
     @ObservedObject var teamReader: TeamReader
     @ObservedObject var shortcutManager: ShortcutManager
+    @ObservedObject var activeTracker: ActiveSessionTracker
     @State private var isExpanded = true
 
     var body: some View {
@@ -1551,6 +1748,7 @@ struct MonitorContentView: View {
                             SessionRowView(
                                 session: session,
                                 teamInfo: teamReader.teamsBySession[session.session_id],
+                                isActive: session.session_id == activeTracker.activeSessionId,
                                 onKill: { killSession(session) }
                             )
                             .overlay(
@@ -1828,6 +2026,8 @@ class ShortcutManager: ObservableObject {
     private var localMonitor: Any?
     private let onTrigger: () -> Void
 
+    private var accessibilityTimer: Timer?
+
     init(onTrigger: @escaping () -> Void) {
         self.onTrigger = onTrigger
         self.keyCode = UInt16(UserDefaults.standard.integer(forKey: "shortcutKeyCode"))
@@ -1839,7 +2039,29 @@ class ShortcutManager: ObservableObject {
             self.keyCode = 0  // 'A'
             self.modifierFlags = [.control, .shift]
         }
-        install()
+        // Defer monitor installation until the run loop is active so global
+        // event monitors work immediately in .accessory apps.
+        DispatchQueue.main.async { [weak self] in
+            self?.ensureAccessibilityAndInstall()
+        }
+    }
+
+    /// Request accessibility access (prompts user if needed) and install monitors.
+    /// If access isn't granted yet, poll every 2s until it is.
+    private func ensureAccessibilityAndInstall() {
+        let opts = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
+        if AXIsProcessTrustedWithOptions(opts) {
+            install()
+        } else {
+            // Poll until user grants access in System Settings
+            accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+                if AXIsProcessTrusted() {
+                    timer.invalidate()
+                    self?.accessibilityTimer = nil
+                    self?.install()
+                }
+            }
+        }
     }
 
     var isEnabled: Bool { keyCode != UInt16.max }
@@ -1880,11 +2102,15 @@ class ShortcutManager: ObservableObject {
         }
     }
 
-    func reinstall() {
+    func uninstall() {
         if let m = globalMonitor { NSEvent.removeMonitor(m) }
         if let m = localMonitor { NSEvent.removeMonitor(m) }
         globalMonitor = nil
         localMonitor = nil
+    }
+
+    func reinstall() {
+        uninstall()
         install()
     }
 
@@ -1914,8 +2140,8 @@ class ShortcutManager: ObservableObject {
     }
 
     deinit {
-        if let m = globalMonitor { NSEvent.removeMonitor(m) }
-        if let m = localMonitor { NSEvent.removeMonitor(m) }
+        accessibilityTimer?.invalidate()
+        uninstall()
     }
 }
 
@@ -1925,6 +2151,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: FloatingPanel!
     let reader = SessionReader()
     let teamReader = TeamReader()
+    var activeTracker: ActiveSessionTracker!
     var sizeObserver: AnyCancellable?
     var shortcutManager: ShortcutManager!
     var lastJumpedSessionId: String?
@@ -1969,11 +2196,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.jumpToNextSession() }
         }
 
+        activeTracker = ActiveSessionTracker(sessionReader: reader)
+
         panel = FloatingPanel()
 
         let hostingView = ClickHostingView(
             rootView: MonitorContentView(
-                reader: reader, teamReader: teamReader, shortcutManager: shortcutManager)
+                reader: reader, teamReader: teamReader, shortcutManager: shortcutManager,
+                activeTracker: activeTracker)
         )
         hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: 40))
         hostingView.wantsLayer = true
