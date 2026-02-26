@@ -285,6 +285,8 @@ class SessionReader: ObservableObject {
     private var projectsWatcher: DirectoryWatcher?
     /// Last known stable status per session (working/idle/attention) for suppressing transient flicker
     private var lastStableStatus: [String: String] = [:]
+    /// Full SessionInfo snapshot for re-injecting disappeared sessions during grace period
+    private var lastStableSession: [String: SessionInfo] = [:]
     /// When a transient status (shutting_down/starting) was first seen, for grace period timing
     private var transientSince: [String: Date] = [:]
 
@@ -793,15 +795,33 @@ class SessionReader: ObservableObject {
 
         // Stabilize transient statuses to prevent flicker during plan mode exit.
         // Plan mode exit fires SessionEnd → SessionStart → tool hooks in rapid succession,
-        // causing brief "shutting_down" → "starting" → "working" transitions.
-        // Suppress transient states for 3s if the session was previously in a stable state.
+        // causing brief "shutting_down" → "starting" → "working" transitions, or the
+        // session file may briefly become "dead"/absent before a new one appears.
+        // Suppress transient states and re-inject disappeared sessions for a 3s grace period.
         let stableStatuses: Set<String> = ["working", "idle", "attention"]
         let transientStatuses: Set<String> = ["shutting_down", "starting"]
         let now = Date()
+        let loadedIds = Set(loaded.map(\.session_id))
+
+        // Re-inject sessions that disappeared but were recently stable
+        for (sid, status) in lastStableStatus {
+            guard !loadedIds.contains(sid) else { continue }
+            if transientSince[sid] == nil {
+                transientSince[sid] = now
+            }
+            if now.timeIntervalSince(transientSince[sid]!) < 3.0,
+               let cached = lastStableSession[sid] {
+                var ghost = cached
+                ghost.status = status
+                loaded.append(ghost)
+            }
+        }
+
         for i in loaded.indices {
             let sid = loaded[i].session_id
             if stableStatuses.contains(loaded[i].status) {
                 lastStableStatus[sid] = loaded[i].status
+                lastStableSession[sid] = loaded[i]
                 transientSince.removeValue(forKey: sid)
             } else if transientStatuses.contains(loaded[i].status),
                       let prev = lastStableStatus[sid] {
@@ -813,10 +833,17 @@ class SessionReader: ObservableObject {
                 }
             }
         }
-        // Clean up tracking for sessions no longer present
-        let loadedIds = Set(loaded.map(\.session_id))
-        lastStableStatus = lastStableStatus.filter { loadedIds.contains($0.key) }
-        transientSince = transientSince.filter { loadedIds.contains($0.key) }
+        // Clean up tracking for sessions gone longer than grace period
+        let allIds = Set(loaded.map(\.session_id))
+        for sid in Array(lastStableStatus.keys) {
+            if !allIds.contains(sid) {
+                if let since = transientSince[sid], now.timeIntervalSince(since) >= 3.0 {
+                    lastStableStatus.removeValue(forKey: sid)
+                    lastStableSession.removeValue(forKey: sid)
+                    transientSince.removeValue(forKey: sid)
+                }
+            }
+        }
 
         // Aggregate sessions with the same project name
         let statusPriority: [String: Int] = [
