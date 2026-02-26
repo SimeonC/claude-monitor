@@ -122,12 +122,13 @@ cleanup_same_terminal() {
     done
 }
 
-# Helper: any non-working/non-dead status → working when user/tool activity happens
+# Helper: any non-working/non-dead/non-attention status → working when user/tool activity happens
+# Preserves "attention" — only idle_prompt/Stop events should clear it.
 set_working() {
     [ -f "$SESSION_FILE" ] || return 0
     jq \
         --arg updated "$NOW" \
-        'if .status == "dead" then . elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
+        'if .status == "dead" or .status == "attention" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
         "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
@@ -208,9 +209,21 @@ case "$EVENT" in
         fi
         ;;
 
+    UserPromptSubmit|PostToolUse)
+        # User submitted prompt or tool completed — clear attention and set working.
+        # PostToolUse means user answered any permission prompt; UserPromptSubmit means user is active.
+        backfill_terminal
+        if [ -f "$SESSION_FILE" ]; then
+            jq \
+                --arg updated "$NOW" \
+                'if .status == "dead" then . else .status = "working" | .updated_at = $updated end' \
+                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+        fi
+        ;;
+
     *)
-        # All other events (UserPromptSubmit, PreToolUse, PostToolUse):
-        # Backfill terminal info and set working (user/tool activity = actively processing)
+        # All other events (PreToolUse, etc.):
+        # Backfill terminal info and set working (preserves attention — see set_working)
         backfill_terminal
         set_working
         ;;
