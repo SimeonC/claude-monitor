@@ -1768,6 +1768,7 @@ struct MonitorContentView: View {
                             .overlay(
                                 FirstMouseClickArea {
                                     switchToSession(session)
+                                    activeTracker.activeSessionId = session.session_id
                                 }
                             )
                             if session.id != reader.sessions.last?.id {
@@ -2168,8 +2169,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let teamReader = TeamReader()
     var activeTracker: ActiveSessionTracker!
     var sizeObserver: AnyCancellable?
+    var activeSessionObserver: AnyCancellable?
     var shortcutManager: ShortcutManager!
-    var lastJumpedSessionId: String?
+    var currentSessionId: String?
 
     func jumpToNextSession() {
         let sessions = reader.sessions
@@ -2177,7 +2179,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let attentionSessions = sessions.filter { $0.status == "attention" }
         let startIndex: Int
-        if let lastId = lastJumpedSessionId,
+        if let lastId = currentSessionId,
            let idx = sessions.firstIndex(where: { $0.session_id == lastId }) {
             startIndex = idx
         } else {
@@ -2185,7 +2187,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let useAttention = attentionSessions.count > 1
-            || (attentionSessions.count == 1 && lastJumpedSessionId != attentionSessions[0].session_id)
+            || (attentionSessions.count == 1 && currentSessionId != attentionSessions[0].session_id)
 
         for offset in 1...sessions.count {
             let idx = (startIndex + offset) % sessions.count
@@ -2193,13 +2195,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if useAttention {
                 if candidate.status == "attention" {
                     switchToSession(candidate)
-                    lastJumpedSessionId = candidate.session_id
+                    currentSessionId = candidate.session_id
                     activeTracker.activeSessionId = candidate.session_id
                     return
                 }
             } else {
                 switchToSession(candidate)
-                lastJumpedSessionId = candidate.session_id
+                currentSessionId = candidate.session_id
                 activeTracker.activeSessionId = candidate.session_id
                 return
             }
@@ -2214,6 +2216,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         activeTracker = ActiveSessionTracker(sessionReader: reader)
+
+        // Sync currentSessionId when focus detection changes the active session,
+        // so keyboard shortcut cycling starts from the currently focused session.
+        activeSessionObserver = activeTracker.$activeSessionId.sink { [weak self] newId in
+            guard let newId = newId else { return }
+            self?.currentSessionId = newId
+        }
 
         panel = FloatingPanel()
 
