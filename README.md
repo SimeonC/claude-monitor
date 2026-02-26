@@ -4,11 +4,11 @@
 
 **A floating macOS dashboard for all your Claude Code sessions.**
 
-See what's working, what's done, and what needs you — at a glance. Hear it too — voice announces when sessions finish or need permission.
+See what's working, what's idle, and what needs attention — at a glance.
 
 <br>
 
-<img src="assets/demo.gif" width="380" alt="Claude Monitor demo" />
+<img src="assets/sessions.png" width="380" alt="Claude Monitor — session list with live status" />
 
 <br>
 <br>
@@ -21,290 +21,64 @@ If you run multiple Claude Code sessions at once, you know the pain: switching t
 
 A tiny always-on-top panel you can drag anywhere on your screen. It shows every active Claude Code session with its status, project name, and last prompt. Click a row to jump straight to that terminal tab.
 
-**And it talks to you.** When a session finishes — *"my-project done."* When one needs permission — *"backend needs attention."* Works out of the box with your Mac's built-in voices. Plug in an [ElevenLabs](https://elevenlabs.io) API key for AI voices, or browse and switch voices from the built-in picker.
-
 <div align="center">
-<table>
-<tr>
-<td><img src="assets/Monitor.png" width="280" alt="Session list" /></td>
-<td><img src="assets/Monitor Menu.png" width="280" alt="Settings popover" /></td>
-</tr>
-<tr>
-<td align="center"><sub>Session tracking with live status</sub></td>
-<td align="center"><sub>Voice settings + session refresh</sub></td>
-</tr>
-</table>
+<img src="assets/shortcuts.png" width="420" alt="Jump shortcuts popover" />
+<br>
+<sub>Configurable global keyboard shortcuts to cycle between sessions</sub>
 </div>
 
 ## Features
 
-**Voice announcements**
-- Speaks when sessions finish or need permission — no more tab-switching to check
-- Works immediately with macOS built-in voices (zero setup)
-- Optional [ElevenLabs](https://elevenlabs.io) support for premium AI voices
-- One-click voice generation — designs a custom AI voice from an included prompt and saves it to your account
-- Built-in voice picker — browse your ElevenLabs library or paste any voice ID
-- Per-event toggles and volume in `config.json`
-
-**See everything**
-- Live status for every session: starting, working, idle, or needs attention
-- Project name, elapsed time, and last prompt preview
-- Team agent badges when sessions spawn sub-agents
-- Color-coded status dots (pulsing cyan = working, orange = attention, green = idle)
-- Stale sessions automatically gray out after 10 minutes
-
-**Stay in flow**
-- Click any row to jump to that terminal tab instantly (Ghostty, iTerm2, Terminal.app)
-- Kill any session with one click (hover to reveal the X)
-- Dead sessions marked inactive on disk (never deleted, prevents concurrent hook errors)
-- Sessions auto-discovered via JSONL scanning — no manual refresh needed
-
-**Designed to disappear**
-- Always-on-top dark glass panel, visible on all Spaces
-- No dock icon, doesn't steal focus from your terminal
-- Drag anywhere, position persists across restarts
-- Thin custom scrollbar, minimal UI footprint
+- **Live status** for every session — working, idle, or needs attention — with color-coded dots
+- **Click to jump** to any session's terminal tab (Ghostty, iTerm2, Terminal.app)
+- **Global keyboard shortcuts** to cycle between sessions needing attention
+- **Team agent badges** when sessions spawn sub-agents
+- **Project name, elapsed time, and last prompt** preview per session
+- **Kill any session** with one click (hover to reveal the X)
+- **Always-on-top** dark glass panel, visible on all Spaces, no dock icon
+- **Auto-discovery** via JSONL scanning — sessions appear without manual refresh
 
 ## Install
 
-### The easy way (recommended)
+### Requirements
 
-Copy this **entire README** into Claude Code (or any coding agent that can edit files) and say:
+- **macOS 14+** (Sonoma or later)
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** CLI
+- **Xcode Command Line Tools** — `xcode-select --install`
+- **jq** — `brew install jq`
+- **Ghostty, iTerm2, or Terminal.app**
 
-> Set up Claude Monitor. Create all the files described in the README, configure hooks, compile, and launch.
-
-That's it. The agent will create the files, wire up the hooks, compile the Swift app, and launch the floating panel. Takes about 30 seconds.
-
-### Manual setup
-
-<details>
-<summary>Click to expand step-by-step instructions</summary>
-
-<br>
-
-#### 1. Install dependencies
+### Setup
 
 ```bash
-xcode-select --install   # Xcode Command Line Tools (for Swift compiler)
-brew install jq           # JSON processor (used by the hook script)
-```
-
-#### 2. Clone and run install
-
-```bash
-git clone <this-repo> && cd osx-claude-code-manager
+git clone https://github.com/SimeonC/claude-monitor.git
+cd claude-monitor
 ./install.sh
 ```
 
-The install script is idempotent: it ensures directories exist, creates `config.json` and merges hooks into `~/.claude/settings.json` only when needed, builds and deploys the binary and hook script, installs the LaunchAgent on first run, and restarts the monitor. Use the same command for first-time setup and for updates.
+The install script is idempotent — it creates directories, merges hooks into `~/.claude/settings.json`, builds the binary, installs a LaunchAgent, and starts the monitor. Run the same command to update.
 
 The floating panel appears in the top-right corner. Drag to reposition — it remembers where you put it.
 
-<details>
-<summary>Hook events (reference)</summary>
-
-The monitor listens for 7 hook events: `SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`, `Notification` (permission_prompt + idle_prompt), and `SessionEnd`. See [`hooks.json`](hooks.json) for the exact configuration.
-
-</details>
-
-</details>
-
-### Updating
-
-Run the same install script from the repo. It rebuilds, deploys the binary and hook script, merges any new hooks into `settings.json`, and restarts the monitor (without overwriting your `config.json` or reinstalling the LaunchAgent):
-
-```bash
-./install.sh
-```
-
-### Verify it works
-
-1. Start a new Claude Code session — it appears as "starting"
-2. Send a prompt — changes to "working" with a prompt preview
-3. Let Claude finish — changes to "done", voice announces
-4. Trigger a permission prompt — shows "attention", voice announces
-5. Click a session row — jumps to that terminal tab
-6. Hover a row and click X — kills that Claude Code session
-
-## Voice Setup
-
-Claude Monitor speaks out loud when sessions finish or need attention. It works out of the box with your Mac's built-in voices — no account or API key needed.
-
-### macOS voices (default, zero setup)
-
-Ships with the **Zoe (Premium)** voice at 50% volume. If you don't have Zoe installed, your Mac will use its default voice automatically.
-
-**To install premium voices** (they sound much better):
-
-1. Open **System Settings** → **Accessibility** → **Spoken Content** → **System Voice** → **Manage Voices**
-2. Browse and download any voice you like (Zoe, Ava, Tom, etc. — look for "Premium" or "Enhanced" variants)
-3. Update `config.json` with the voice name:
-
-```json
-{
-  "tts_provider": "say",
-  "say": { "voice": "Zoe (Premium)", "rate": 200 }
-}
-```
-
-Run `say -v '?'` in Terminal to list all installed voices and their exact names.
-
-### ElevenLabs (AI voices)
-
-For the highest quality, you can use [ElevenLabs](https://elevenlabs.io) AI voices instead:
-
-1. Get an API key at [elevenlabs.io](https://elevenlabs.io)
-2. Copy the included example and add your key:
-   ```bash
-   cp .env.example ~/.env
-   # edit ~/.env and paste your API key
-   ```
-3. Update `config.json`:
-   ```json
-   {
-     "tts_provider": "elevenlabs",
-     "elevenlabs": {
-       "env_file": "~/.env"
-     }
-   }
-   ```
-4. Open the settings popover (gear icon) and click **Generate voice** — this designs a custom AI voice from the included prompt and saves it to your ElevenLabs account. One click, done.
-
-You can also browse your existing ElevenLabs voice library from the voice picker, or paste any voice ID from your clipboard — the app resolves the name automatically and saves it to your list.
-
-The included voice design prompt creates a warm, softly synthetic voice — like a machine that genuinely cares. You can customize it in `config.json` under `elevenlabs.voice_design_prompt`.
-
-### Volume and toggles
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `announce.enabled` | `true` | Master on/off (also togglable from the gear icon) |
-| `announce.volume` | `0.5` | Volume from `0.0` (silent) to `1.0` (full) |
-| `announce.on_done` | `true` | Speak when a session finishes |
-| `announce.on_attention` | `true` | Speak when a session needs permission |
-| `announce.on_start` | `false` | Speak when a session starts |
-
-## Requirements
-
-- **macOS 14+** (Sonoma or later)
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — the CLI tool from Anthropic
-- **Xcode Command Line Tools** — `xcode-select --install` (for the Swift compiler)
-- **jq** — `brew install jq` (for JSON processing in the hook script)
-- **Ghostty, iTerm2, or Terminal.app**
-- (Optional) [ElevenLabs](https://elevenlabs.io) API key for AI voices
-
-## How It Works
-
-```
-Claude Code hook fires
-        |
-        v
-monitor.sh writes session JSON to ~/.claude/monitor/sessions/{id}.json
-        |
-        v
-Swift app detects changes via FSEvents, reads updated session files
-        |
-        v
-Floating panel updates: status dot, project name, prompt preview, elapsed time
-        |
-        v
-Click row → switches to the right Ghostty/iTerm2/Terminal.app window
-TTS → announces "project done" or "project needs attention"
-```
-
-Session files are **never deleted** — status transitions replace destructive removal to prevent `jq` race conditions in concurrent hooks. The Swift app also scans `~/.claude/projects/` JSONL files to auto-discover sessions that weren't created by hooks.
-
-Each Claude Code lifecycle event maps to a session status:
-
-| Event | Status | Voice |
-|-------|--------|-------|
-| Session starts | `starting` | Optional (off by default) |
-| You send a prompt | `working` | No |
-| Claude finishes / idle prompt | `idle` | Yes (on finish) |
-| Claude needs permission | `attention` | Yes |
-| You exit Claude Code | `shutting_down` → `dead` | No |
-| Process no longer running | `dead` (file stays on disk) | No |
-
-See [Architecture](docs/ARCHITECTURE.md) for the full technical deep-dive.
-
-## Configuration
-
-Full config reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
-
-```json
-{
-  "tts_provider": "say",
-  "elevenlabs": {
-    "env_file": "~/.env",
-    "model": "eleven_multilingual_v2",
-    "stability": 0.5,
-    "similarity_boost": 0.75,
-    "voice_design_prompt": "Soft, androgynous male voice with a clear synthetic quality...",
-    "voice_design_name": "claude-monitor"
-  },
-  "say": { "voice": "Zoe (Premium)", "rate": 200 },
-  "announce": {
-    "enabled": true,
-    "on_done": true,
-    "on_attention": true,
-    "on_start": false,
-    "volume": 0.5
-  },
-  "voices": []
-}
-```
-
-## Troubleshooting
-
-See [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for detailed solutions. Quick fixes:
-
-| Problem | Fix |
-|---------|-----|
-| Sessions don't appear | Send a new prompt in that session to trigger the hook |
-| Click doesn't switch tabs | Check that `terminal_session_id` is set in the session JSON |
-| No voice | Verify `announce.enabled` is `true` and `volume` > `0` |
-| Wrong voice | Run `say -v '?'` to find the exact voice name, update `say.voice` |
-| Panel gone | `pkill -9 claude_monitor && ./install.sh` (from repo) |
-| Wrong position | `defaults delete claude_monitor monitorX && defaults delete claude_monitor monitorY` then `./install.sh` |
-
-## Uninstall
+### Uninstall
 
 ```bash
 pkill claude_monitor
-rm -rf ~/.claude/monitor
-rm ~/.claude/hooks/monitor.sh
-# If you used the LaunchAgent:
-launchctl bootout "gui/$(id -u)/com.claude.monitor"
-rm ~/Library/LaunchAgents/com.claude.monitor.plist
+rm -rf ~/.claude/monitor ~/.claude/hooks/monitor.sh
+launchctl bootout "gui/$(id -u)/com.claude.monitor" 2>/dev/null
+rm -f ~/Library/LaunchAgents/com.claude.monitor.plist
 ```
 
-Then remove the 7 hook entries (`SessionStart`, `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`, `Notification`, `SessionEnd`) from `~/.claude/settings.json`.
+Then remove the hook entries from `~/.claude/settings.json`.
 
-## File Layout
+## How It Works
 
-The repo holds source and the install script; `~/.claude` holds only runtime artifacts (no source or scripts copied there).
+Claude Code hooks fire on session events → `monitor.sh` writes session JSON to `~/.claude/monitor/sessions/` → the Swift app detects changes via FSEvents and updates the floating panel. Session files are never deleted — status transitions replace destructive removal to prevent race conditions in concurrent hooks.
 
-**Repo (source of truth):** `claude_monitor.swift`, `install.sh`, `monitor.sh`, `hooks.json`, `config.json`, etc.
+## Credits
 
-**Runtime (`~/.claude/`):**
-
-```
-~/.claude/
-├── monitor/
-│   ├── claude_monitor          # Compiled binary (deployed by install.sh)
-│   ├── config.json             # TTS + announcement config (created if missing)
-│   └── sessions/               # Session JSON files (auto-managed)
-├── hooks/
-│   └── monitor.sh              # Hook script (deployed by install.sh)
-└── settings.json               # Claude Code settings (hooks merged by install.sh)
-```
+Originally created by [brb-dreaming](https://github.com/brb-dreaming/claude-monitor). This fork has diverged significantly with keyboard shortcuts, team agent support, session auto-discovery, and many other changes.
 
 ## License
 
 [MIT](LICENSE)
-
----
-
-<div align="center">
-<sub>Built with Claude Code. Naturally.</sub>
-</div>
