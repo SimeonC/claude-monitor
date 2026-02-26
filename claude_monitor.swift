@@ -852,8 +852,7 @@ class SessionReader: ObservableObject {
         var grouped: [String: [SessionInfo]] = [:]
         for s in loaded { grouped[s.project, default: []].append(s) }
 
-        // Merge groups where one session's CWD is ancestor of another's
-        // e.g. "survey" (cwd: .../survey) absorbs "survey-e2e" (cwd: .../survey/apps/survey-e2e)
+        // Merge groups that share the exact same CWD (different project names, same directory)
         var didMerge = true
         while didMerge {
             didMerge = false
@@ -862,24 +861,11 @@ class SessionReader: ObservableObject {
                 for j in (i + 1)..<keys.count {
                     let a = keys[i]
                     let b = keys[j]
-                    let cwdsA = grouped[a]!.map { $0.cwd }
-                    let cwdsB = grouped[b]!.map { $0.cwd }
-                    var aIsParent = false
-                    var bIsParent = false
-                    for cwdA in cwdsA {
-                        for cwdB in cwdsB {
-                            if cwdB.hasPrefix(cwdA + "/") { aIsParent = true }
-                            if cwdA.hasPrefix(cwdB + "/") { bIsParent = true }
-                        }
-                    }
-                    if aIsParent {
+                    let cwdsA = Set(grouped[a]!.map { $0.cwd })
+                    let cwdsB = Set(grouped[b]!.map { $0.cwd })
+                    if !cwdsA.isDisjoint(with: cwdsB) {
                         grouped[a]!.append(contentsOf: grouped[b]!)
                         grouped.removeValue(forKey: b)
-                        didMerge = true
-                        break outer
-                    } else if bIsParent {
-                        grouped[b]!.append(contentsOf: grouped[a]!)
-                        grouped.removeValue(forKey: a)
                         didMerge = true
                         break outer
                     }
@@ -1195,7 +1181,7 @@ func scoreGhosttyWindow(title: String, doc: String, cwd: String) -> Int {
     if !doc.isEmpty, let url = URL(string: doc), url.scheme == "file" {
         let docPath = url.path.lowercased()
         let docNormalized = docPath.hasSuffix("/") ? docPath : docPath + "/"
-        if docNormalized == cwdNormalized || docNormalized.hasPrefix(cwdNormalized) {
+        if docNormalized == cwdNormalized {
             return 30
         }
     }
