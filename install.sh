@@ -75,14 +75,6 @@ cp "$BUILD_BINARY" "$BINARY"
 cp "$REPO_DIR/monitor.sh" "$HOOKS_DIR/monitor.sh"
 chmod +x "$HOOKS_DIR/monitor.sh"
 
-# --- Deploy fish function ---
-FISH_FUNCTIONS_DIR="$HOME/.config/fish/functions"
-if [ -d "$(dirname "$FISH_FUNCTIONS_DIR")" ]; then
-    mkdir -p "$FISH_FUNCTIONS_DIR"
-    cp "$REPO_DIR/claude.fish" "$FISH_FUNCTIONS_DIR/claude.fish"
-    echo "Installed claude.fish to $FISH_FUNCTIONS_DIR"
-fi
-
 # --- 5. LaunchAgent (only if not installed) ---
 AGENT_LOADED=false
 if launchctl print "gui/$(id -u)/$LABEL" &>/dev/null; then

@@ -60,6 +60,16 @@ The install script is idempotent — it creates directories, merges hooks into `
 
 The floating panel appears in the top-right corner. Drag to reposition — it remembers where you put it.
 
+#### Fish shell
+
+If you use [fish](https://fishshell.com/), run the fish integration script after the main install:
+
+```bash
+./install_fish.sh
+```
+
+This installs `claude.fish` to `~/.config/fish/functions/`, which wraps the `claude` command with tmux session management and session ID tracking for the monitor.
+
 ### Uninstall
 
 ```bash
