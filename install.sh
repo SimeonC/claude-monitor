@@ -47,6 +47,15 @@ else
     echo "Merged monitor hooks into settings.json (user hooks preserved)."
 fi
 
+# --- 3b. statusLine hook ---
+cp "$REPO_DIR/statusline.sh" "$HOOKS_DIR/statusline.sh"
+chmod +x "$HOOKS_DIR/statusline.sh"
+
+STATUSLINE_CMD="bash $HOME/.claude/hooks/statusline.sh"
+jq --arg cmd "$STATUSLINE_CMD" '.statusLine = {"type": "command", "command": $cmd}' \
+    "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+echo "Configured statusLine hook in settings.json."
+
 # --- 4. Build: compile in repo, deploy binary + monitor.sh ---
 SWIFT_FILE="$REPO_DIR/claude_monitor.swift"
 BUILD_BINARY="$REPO_DIR/claude_monitor"

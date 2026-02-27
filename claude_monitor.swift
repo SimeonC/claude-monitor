@@ -174,19 +174,20 @@ struct SessionInfo: Codable, Identifiable {
     var last_prompt: String
     var agent_count: Int
     var parent_session_id: String?
+    var context_pct: Int?
 
     var id: String { session_id }
 
     enum CodingKeys: String, CodingKey {
         case session_id, status, project, cwd, terminal, terminal_session_id, started_at,
-            updated_at, last_prompt, agent_count, parent_session_id
+            updated_at, last_prompt, agent_count, parent_session_id, context_pct
     }
 
     init(
         session_id: String, status: String, project: String, cwd: String,
         terminal: String, terminal_session_id: String,
         started_at: String, updated_at: String, last_prompt: String,
-        agent_count: Int = 0, parent_session_id: String? = nil
+        agent_count: Int = 0, parent_session_id: String? = nil, context_pct: Int? = nil
     ) {
         self.session_id = session_id
         self.status = status
@@ -199,6 +200,7 @@ struct SessionInfo: Codable, Identifiable {
         self.last_prompt = last_prompt
         self.agent_count = agent_count
         self.parent_session_id = parent_session_id
+        self.context_pct = context_pct
     }
 
     init(from decoder: Decoder) throws {
@@ -214,6 +216,7 @@ struct SessionInfo: Codable, Identifiable {
         last_prompt = (try? c.decode(String.self, forKey: .last_prompt)) ?? ""
         agent_count = (try? c.decode(Int.self, forKey: .agent_count)) ?? 0
         parent_session_id = try? c.decode(String.self, forKey: .parent_session_id)
+        context_pct = try? c.decode(Int.self, forKey: .context_pct)
     }
 
     var statusColor: Color {
@@ -225,6 +228,13 @@ struct SessionInfo: Codable, Identifiable {
         case "shutting_down": return .gray
         default: return .gray
         }
+    }
+
+    var contextPctColor: Color {
+        guard let pct = context_pct else { return .gray }
+        if pct >= 80 { return .orange }
+        if pct >= 50 { return .yellow }
+        return .doneGreen
     }
 
     var statusIcon: String {
@@ -1537,6 +1547,16 @@ struct SessionRowView: View {
                                     .offset(x: -24)
                             }
                         }
+
+                    if let pct = session.context_pct {
+                        Text("\(pct)%")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundColor(session.contextPctColor)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(session.contextPctColor.opacity(0.15)))
+                            .fixedSize()
+                    }
                 }
 
                 HStack(spacing: 6) {
@@ -1832,7 +1852,7 @@ struct MonitorContentView: View {
                 .frame(maxHeight: 600)
             }
         }
-        .frame(width: 280)
+        .frame(width: 310)
         .fixedSize(horizontal: false, vertical: true)
         .background(
             RoundedRectangle(cornerRadius: 12)
