@@ -7,6 +7,18 @@ function claude --wraps=claude --description 'Claude Code with tmux session mana
     end
     echo $next >"$counter_file"
 
+    # Pass-through without tmux for non-interactive subcommands and info flags
+    if test (count $argv) -ge 1
+        switch "$argv[1]"
+            case update mcp config
+                command claude $argv
+                return
+            case --help -h --version -v
+                command claude $argv
+                return
+        end
+    end
+
     set -gx CLAUDE_MONITOR_ID $next
 
     set -l short_cwd (string replace "$HOME" "~" "$PWD")
