@@ -66,6 +66,39 @@
       ]
     }
   ],
+  "SubagentStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "$HOME/.claude/hooks/monitor.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "SubagentStop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "$HOME/.claude/hooks/monitor.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PostToolUseFailure": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "$HOME/.claude/hooks/monitor.sh",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
   "SessionEnd": [
     {
       "hooks": [

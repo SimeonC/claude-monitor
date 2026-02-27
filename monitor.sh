@@ -52,6 +52,85 @@ is_subagent() {
 }
 
 if is_subagent; then
+    IS_SUBAGENT=true
+else
+    IS_SUBAGENT=false
+fi
+
+# --- Sub-agent session file helpers ---
+# Extract transcript_path from hook JSON; derive sub-agent ID and parent session ID.
+TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty')
+
+find_subagent_session_file() {
+    # Only works if transcript_path contains /subagents/
+    if [ -z "$TRANSCRIPT_PATH" ] || ! echo "$TRANSCRIPT_PATH" | grep -q '/subagents/'; then
+        return 1
+    fi
+    # Extract filename without .jsonl as sub-agent ID
+    local filename
+    filename=$(basename "$TRANSCRIPT_PATH" .jsonl)
+    SUBAGENT_ID="$filename"
+    SUBAGENT_SESSION_FILE="$SESSIONS_DIR/sub-${SUBAGENT_ID}.json"
+    # Parent session ID = directory name two levels up from the subagent file
+    # e.g. .../projects/<project>/<parentSid>/subagents/<file>.jsonl
+    local parent_dir
+    parent_dir=$(dirname "$(dirname "$TRANSCRIPT_PATH")")
+    SUBAGENT_PARENT_SID=$(basename "$parent_dir")
+    return 0
+}
+
+# Helper: create sub-agent session file if it doesn't exist (self-registration)
+ensure_subagent_file() {
+    find_subagent_session_file || return 1
+    if [ ! -f "$SUBAGENT_SESSION_FILE" ]; then
+        jq -n \
+            --arg sid "sub-${SUBAGENT_ID}" \
+            --arg status "working" \
+            --arg project "$PROJECT" \
+            --arg cwd "${CWD:-}" \
+            --arg parent "$SUBAGENT_PARENT_SID" \
+            --arg now "$NOW" \
+            '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: "", terminal_session_id: "", started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent}' \
+            > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+    fi
+    return 0
+}
+
+# --- Sub-agent event handling ---
+if [ "$IS_SUBAGENT" = "true" ]; then
+    case "$EVENT" in
+        Notification)
+            NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
+            if ensure_subagent_file; then
+                if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
+                    jq --arg updated "$NOW" \
+                        'if .status == "dead" then . else .status = "idle" | .updated_at = $updated end' \
+                        "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+                elif [ "$NOTIF_TYPE" = "permission_prompt" ]; then
+                    jq --arg updated "$NOW" \
+                        'if .status == "dead" then . else .status = "attention" | .updated_at = $updated end' \
+                        "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+                fi
+            fi
+            ;;
+        PreToolUse|PostToolUse|PostToolUseFailure)
+            if ensure_subagent_file; then
+                jq --arg updated "$NOW" \
+                    'if .status == "dead" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
+                    "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+            fi
+            ;;
+        Stop)
+            if ensure_subagent_file; then
+                jq --arg updated "$NOW" \
+                    'if .status == "dead" then . else .status = "idle" | .updated_at = $updated end' \
+                    "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+            fi
+            ;;
+        *)
+            # All other sub-agent events: ignore
+            ;;
+    esac
     exit 0
 fi
 
@@ -78,7 +157,11 @@ detect_terminal() {
     done
 
     if [ -n "${GHOSTTY_RESOURCES_DIR:-}" ]; then
-        echo "ghostty|/dev/$tty_name"
+        if [ -n "${CLAUDE_MONITOR_ID:-}" ]; then
+            echo "ghostty|$CLAUDE_MONITOR_ID"
+        else
+            echo "ghostty|/dev/$tty_name"
+        fi
         return
     fi
 
@@ -209,9 +292,31 @@ case "$EVENT" in
         fi
         ;;
 
-    UserPromptSubmit|PostToolUse)
+    SubagentStart)
+        # Sub-agent spawned — update parent status to working
+        backfill_terminal
+        set_working
+        ;;
+
+    SubagentStop)
+        # Sub-agent finished — update parent status to working
+        # Also mark the sub-agent's session file as dead if we can find it
+        AGENT_TRANSCRIPT=$(echo "$INPUT" | jq -r '.agent_transcript_path // empty')
+        if [ -n "$AGENT_TRANSCRIPT" ]; then
+            local_filename=$(basename "$AGENT_TRANSCRIPT" .jsonl)
+            local_subagent_file="$SESSIONS_DIR/sub-${local_filename}.json"
+            if [ -f "$local_subagent_file" ]; then
+                jq --arg updated "$NOW" '.status = "dead" | .updated_at = $updated' \
+                    "$local_subagent_file" > "${local_subagent_file}.tmp" && mv "${local_subagent_file}.tmp" "$local_subagent_file"
+            fi
+        fi
+        backfill_terminal
+        set_working
+        ;;
+
+    UserPromptSubmit|PostToolUse|PostToolUseFailure)
         # User submitted prompt or tool completed — clear attention and set working.
-        # PostToolUse means user answered any permission prompt; UserPromptSubmit means user is active.
+        # PostToolUse/PostToolUseFailure means user answered any permission prompt; UserPromptSubmit means user is active.
         backfill_terminal
         if [ -f "$SESSION_FILE" ]; then
             jq \

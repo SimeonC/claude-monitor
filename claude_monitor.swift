@@ -173,19 +173,20 @@ struct SessionInfo: Codable, Identifiable {
     var updated_at: String
     var last_prompt: String
     var agent_count: Int
+    var parent_session_id: String?
 
     var id: String { session_id }
 
     enum CodingKeys: String, CodingKey {
         case session_id, status, project, cwd, terminal, terminal_session_id, started_at,
-            updated_at, last_prompt, agent_count
+            updated_at, last_prompt, agent_count, parent_session_id
     }
 
     init(
         session_id: String, status: String, project: String, cwd: String,
         terminal: String, terminal_session_id: String,
         started_at: String, updated_at: String, last_prompt: String,
-        agent_count: Int = 0
+        agent_count: Int = 0, parent_session_id: String? = nil
     ) {
         self.session_id = session_id
         self.status = status
@@ -197,6 +198,7 @@ struct SessionInfo: Codable, Identifiable {
         self.updated_at = updated_at
         self.last_prompt = last_prompt
         self.agent_count = agent_count
+        self.parent_session_id = parent_session_id
     }
 
     init(from decoder: Decoder) throws {
@@ -211,6 +213,7 @@ struct SessionInfo: Codable, Identifiable {
         updated_at = (try? c.decode(String.self, forKey: .updated_at)) ?? ""
         last_prompt = (try? c.decode(String.self, forKey: .last_prompt)) ?? ""
         agent_count = (try? c.decode(Int.self, forKey: .agent_count)) ?? 0
+        parent_session_id = try? c.decode(String.self, forKey: .parent_session_id)
     }
 
     var statusColor: Color {
@@ -713,6 +716,7 @@ class SessionReader: ObservableObject {
             }
 
             // Mark dead sessions (skip team leads with active agents)
+            let deadSet = Set(deadSessionIds)
             for sid in deadSessionIds {
                 if self.sessionHasActiveTeam(sid) {
                     NSLog("[ClaudeMonitor] Skipping prune of team lead %@ (has active agents)", sid)
@@ -725,6 +729,20 @@ class SessionReader: ObservableObject {
                     self.writeSessionFile(session, to: path)
                 }
                 NSLog("[ClaudeMonitor] Marked dead session %@", sid)
+            }
+
+            // Also mark child sessions as dead when their parent is dead
+            for session in currentSessions {
+                guard let parentSid = session.parent_session_id,
+                      session.status != "dead",
+                      deadSet.contains(parentSid) else { continue }
+                let path = "\(self.sessionsDir)/\(session.session_id).json"
+                if let data = FileManager.default.contents(atPath: path),
+                   var child = try? JSONDecoder().decode(SessionInfo.self, from: data) {
+                    child.status = "dead"
+                    self.writeSessionFile(child, to: path)
+                    NSLog("[ClaudeMonitor] Marked child session %@ as dead (parent %@ is dead)", child.session_id, parentSid)
+                }
             }
         }
     }
@@ -856,6 +874,37 @@ class SessionReader: ObservableObject {
                 }
             }
         }
+
+        // --- Sub-agent aggregation: propagate child attention to parent, hide child rows ---
+        // Partition into parent and child sessions
+        var childSessions: [SessionInfo] = []
+        var parentSessions: [SessionInfo] = []
+        for s in loaded {
+            if s.parent_session_id != nil {
+                childSessions.append(s)
+            } else {
+                parentSessions.append(s)
+            }
+        }
+
+        // For each parent: if ANY non-dead child has status == "attention", override parent display to "attention"
+        if !childSessions.isEmpty {
+            var parentHasChildAttention: Set<String> = []
+            for child in childSessions {
+                guard let parentSid = child.parent_session_id, child.status == "attention" else { continue }
+                parentHasChildAttention.insert(parentSid)
+            }
+            for i in parentSessions.indices {
+                if parentHasChildAttention.contains(parentSessions[i].session_id) {
+                    // Only escalate if parent isn't already in attention (or dead)
+                    if parentSessions[i].status != "dead" && parentSessions[i].status != "attention" {
+                        parentSessions[i].status = "attention"
+                    }
+                }
+            }
+        }
+        // Replace loaded with parent-only sessions (children are hidden from UI)
+        loaded = parentSessions
 
         // Aggregate sessions with the same project name
         let statusPriority: [String: Int] = [
@@ -1063,7 +1112,7 @@ class ActiveSessionTracker: ObservableObject {
         var bestId: String? = nil
         var bestScore = 0
         for session in sessions {
-            let score = scoreGhosttyWindow(title: title, doc: doc, cwd: session.cwd)
+            let score = scoreGhosttyWindow(title: title, doc: doc, cwd: session.cwd, sessionId: session.terminal_session_id)
             if score > bestScore {
                 bestScore = score
                 bestId = session.session_id
@@ -1124,7 +1173,7 @@ func switchToSession(_ session: SessionInfo) {
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
     } else if session.terminal == "ghostty" {
-        switchToGhostty(cwd: session.cwd, ttyPath: session.terminal_session_id)
+        switchToGhostty(cwd: session.cwd, ttyPath: session.terminal_session_id, sessionId: session.terminal_session_id)
     } else if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
         switchToTerminal(ttyPath: session.terminal_session_id)
     } else {
@@ -1192,11 +1241,22 @@ func switchToTerminal(ttyPath: String) {
 }
 
 /// Score a Ghostty window/tab title + AXDocument against a target CWD.
-/// Returns 0 (no match), 25 (title contains basename), or 30 (AXDocument CWD match).
+/// Returns 0 (no match), 25 (title contains basename), 30 (AXDocument CWD match),
+/// or 40 (explicit session ID match via `[N]` in title).
 /// Only considers windows whose title starts with "tmux ".
-func scoreGhosttyWindow(title: String, doc: String, cwd: String) -> Int {
+func scoreGhosttyWindow(title: String, doc: String, cwd: String, sessionId: String = "") -> Int {
     let lower = title.lowercased()
     guard lower.hasPrefix("tmux ") else { return 0 }
+
+    // Highest priority: explicit numeric session ID match from claude.fish wrapper
+    if !sessionId.isEmpty,
+       let match = title.range(of: #"\[(\d+)\]"#, options: .regularExpression) {
+        let bracket = title[match]
+        let number = bracket.dropFirst().dropLast() // strip [ and ]
+        if String(number) == sessionId {
+            return 40
+        }
+    }
 
     let cwdNormalized = (cwd.hasSuffix("/") ? cwd : cwd + "/").lowercased()
 
@@ -1217,7 +1277,7 @@ func scoreGhosttyWindow(title: String, doc: String, cwd: String) -> Int {
     return 0
 }
 
-func switchToGhostty(cwd: String, ttyPath: String) {
+func switchToGhostty(cwd: String, ttyPath: String, sessionId: String = "") {
     let basename = (cwd as NSString).lastPathComponent
 
     guard
@@ -1282,7 +1342,7 @@ func switchToGhostty(cwd: String, ttyPath: String) {
         let windowTitle = titleRef as? String ?? ""
         let document = getDocument(window)
 
-        let windowScore = scoreGhosttyWindow(title: windowTitle, doc: document, cwd: cwd)
+        let windowScore = scoreGhosttyWindow(title: windowTitle, doc: document, cwd: cwd, sessionId: sessionId)
 
         // For multi-tab windows, score each tab individually too
         if let tabs = getTabs(window), tabs.count > 1 {
@@ -1292,7 +1352,7 @@ func switchToGhostty(cwd: String, ttyPath: String) {
                 AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &tabTitleRef)
                 let tabTitle = tabTitleRef as? String ?? ""
                 guard !tabTitle.isEmpty else { continue }
-                let s = scoreGhosttyWindow(title: tabTitle, doc: document, cwd: cwd)
+                let s = scoreGhosttyWindow(title: tabTitle, doc: document, cwd: cwd, sessionId: sessionId)
                 if s > 0 {
                     candidates.append(Candidate(window: window, tab: tab, title: tabTitle, score: s))
                     hadTabMatch = true

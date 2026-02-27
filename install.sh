@@ -28,15 +28,23 @@ if [ ! -f "$SETTINGS_FILE" ]; then
     jq -n --slurpfile hooks "$DESIRED_HOOKS" '{hooks: $hooks[0]}' > "$SETTINGS_FILE"
     echo "Created $SETTINGS_FILE with monitor hooks."
 else
-    BEFORE=$(jq -r '.hooks // {} | keys[]' "$SETTINGS_FILE" 2>/dev/null | sort)
+    # Safe merge: for each event in desired hooks, remove existing monitor.sh groups
+    # then append desired groups. User hooks on the same event are preserved.
     jq --slurpfile desired "$DESIRED_HOOKS" '
-        .hooks = ((.hooks // {}) * $desired[0])
+        .hooks = (
+            (.hooks // {}) as $existing |
+            ($desired[0] | keys) as $events |
+            reduce $events[] as $ev (
+                $existing;
+                # Remove groups whose hooks contain monitor.sh, then append desired groups
+                .[$ev] = (
+                    ((.[$ev] // []) | map(select(.hooks | all(.command | test("monitor\\.sh$") | not))))
+                    + $desired[0][$ev]
+                )
+            )
+        )
     ' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
-    AFTER=$(jq -r '.hooks | keys[]' "$SETTINGS_FILE" | sort)
-    ADDED=$(comm -13 <(echo "$BEFORE") <(echo "$AFTER"))
-    if [ -n "$ADDED" ]; then
-        echo "Added hook events: $ADDED"
-    fi
+    echo "Merged monitor hooks into settings.json (user hooks preserved)."
 fi
 
 # --- 4. Build: compile in repo, deploy binary + monitor.sh ---
@@ -57,6 +65,14 @@ echo "Build successful."
 cp "$BUILD_BINARY" "$BINARY"
 cp "$REPO_DIR/monitor.sh" "$HOOKS_DIR/monitor.sh"
 chmod +x "$HOOKS_DIR/monitor.sh"
+
+# --- Deploy fish function ---
+FISH_FUNCTIONS_DIR="$HOME/.config/fish/functions"
+if [ -d "$(dirname "$FISH_FUNCTIONS_DIR")" ]; then
+    mkdir -p "$FISH_FUNCTIONS_DIR"
+    cp "$REPO_DIR/claude.fish" "$FISH_FUNCTIONS_DIR/claude.fish"
+    echo "Installed claude.fish to $FISH_FUNCTIONS_DIR"
+fi
 
 # --- 5. LaunchAgent (only if not installed) ---
 AGENT_LOADED=false
