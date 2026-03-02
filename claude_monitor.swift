@@ -340,6 +340,8 @@ class SessionReader: ObservableObject {
     private var inferredDeadIds: Set<String> = []
     /// Sessions from before last boot (held in memory, not written to files)
     private var preBootDeadIds: Set<String> = []
+    /// Serial queue for all disk I/O and state mutations (keeps main thread free for UI)
+    private let ioQueue = DispatchQueue(label: "com.claudemonitor.sessionio", qos: .userInitiated)
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -359,17 +361,13 @@ class SessionReader: ObservableObject {
 
         // FSEvents: reload when session files change (1s coalescing to avoid flicker)
         dirSource = DirectoryWatcher(paths: [sessionsDir], latency: 1.0) { [weak self] in
-            DispatchQueue.main.async {
-                self?.readSessions()
-            }
+            self?.readSessions()
         }
 
         // FSEvents on projects dir: detect new/changed JSONL files
         projectsWatcher = DirectoryWatcher(paths: [projectsDir], latency: 1.0) { [weak self] in
-            DispatchQueue.main.async {
-                self?.scanProjects()
-                self?.readSessions()
-            }
+            self?.scanProjects()
+            self?.readSessions()
         }
 
         // Liveness timer: prune dead sessions (absence of writes can't trigger FSEvents)
@@ -515,101 +513,110 @@ class SessionReader: ObservableObject {
     /// Scan `~/.claude/projects/` JSONL files to populate in-memory derivedData.
     /// No session files are written — readSessions() merges this data at display time.
     func scanProjects() {
-        let fm = FileManager.default
-        guard let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) else { return }
-        let now = Date()
-        let twoMinAgo = now.addingTimeInterval(-120)
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            guard let projectDirs = try? fm.contentsOfDirectory(atPath: self.projectsDir) else { return }
+            let now = Date()
+            let twoMinAgo = now.addingTimeInterval(-120)
 
-        var newDerived: [String: DerivedSessionData] = [:]
+            var newDerived: [String: DerivedSessionData] = [:]
 
-        for projectDir in projectDirs {
-            let projectPath = "\(projectsDir)/\(projectDir)"
+            for projectDir in projectDirs {
+                let projectPath = "\(self.projectsDir)/\(projectDir)"
 
-            // Only look at top-level .jsonl files (skip subdirectories like session dirs and subagents/)
-            guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { continue }
+                // Only look at top-level .jsonl files (skip subdirectories like session dirs and subagents/)
+                guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { continue }
 
-            for file in files where file.hasSuffix(".jsonl") {
-                let jsonlPath = "\(projectPath)/\(file)"
+                for file in files where file.hasSuffix(".jsonl") {
+                    let jsonlPath = "\(projectPath)/\(file)"
 
-                // Check mtime — only active sessions (modified within 2 min)
-                guard let attrs = try? fm.attributesOfItem(atPath: jsonlPath),
-                    let mtime = attrs[.modificationDate] as? Date
-                else { continue }
-                guard mtime > twoMinAgo else { continue }
+                    // Check mtime — only active sessions (modified within 2 min)
+                    guard let attrs = try? fm.attributesOfItem(atPath: jsonlPath),
+                        let mtime = attrs[.modificationDate] as? Date
+                    else { continue }
+                    guard mtime > twoMinAgo else { continue }
 
-                let sessionId = String(file.dropLast(6))  // remove ".jsonl"
+                    let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
-                // Read last ~4KB to extract info
-                let (cwd, lastPrompt, _, isSubagent) = readJSONLTail(path: jsonlPath)
+                    // Read last ~4KB to extract info
+                    let (cwd, lastPrompt, _, isSubagent) = self.readJSONLTail(path: jsonlPath)
 
-                // Skip subagent sessions (team members, Task tool agents)
-                if isSubagent { continue }
+                    // Skip subagent sessions (team members, Task tool agents)
+                    if isSubagent { continue }
 
-                // No cwd in tail → can't determine project, skip
-                if cwd.isEmpty { continue }
+                    // No cwd in tail → can't determine project, skip
+                    if cwd.isEmpty { continue }
 
-                let project = (cwd as NSString).lastPathComponent
+                    let project = (cwd as NSString).lastPathComponent
 
-                // Count active subagents
-                let subagentsDir = "\(projectPath)/\(sessionId)/subagents"
-                var agentCount = 0
-                if let subFiles = try? fm.contentsOfDirectory(atPath: subagentsDir) {
-                    for subFile in subFiles where subFile.hasSuffix(".jsonl") {
-                        let subPath = "\(subagentsDir)/\(subFile)"
-                        if let subAttrs = try? fm.attributesOfItem(atPath: subPath),
-                            let subMtime = subAttrs[.modificationDate] as? Date,
-                            subMtime > twoMinAgo
-                        {
-                            agentCount += 1
+                    // Count active subagents
+                    let subagentsDir = "\(projectPath)/\(sessionId)/subagents"
+                    var agentCount = 0
+                    if let subFiles = try? fm.contentsOfDirectory(atPath: subagentsDir) {
+                        for subFile in subFiles where subFile.hasSuffix(".jsonl") {
+                            let subPath = "\(subagentsDir)/\(subFile)"
+                            if let subAttrs = try? fm.attributesOfItem(atPath: subPath),
+                                let subMtime = subAttrs[.modificationDate] as? Date,
+                                subMtime > twoMinAgo
+                            {
+                                agentCount += 1
+                            }
                         }
                     }
+
+                    newDerived[sessionId] = DerivedSessionData(
+                        project: project,
+                        cwd: cwd,
+                        lastPrompt: lastPrompt,
+                        agentCount: agentCount,
+                        jsonlMtime: mtime,
+                        jsonlPath: jsonlPath
+                    )
                 }
-
-                newDerived[sessionId] = DerivedSessionData(
-                    project: project,
-                    cwd: cwd,
-                    lastPrompt: lastPrompt,
-                    agentCount: agentCount,
-                    jsonlMtime: mtime,
-                    jsonlPath: jsonlPath
-                )
             }
-        }
 
-        derivedData = newDerived
+            self.derivedData = newDerived
+        }
     }
 
     /// Detect dead sessions and collect their IDs in memory (no file writes).
     func pruneDeadSessions() {
-        // Read raw files from disk instead of using aggregated `sessions` property,
-        // so every session file gets liveness-checked (not just deduplicated ones)
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
-        var currentSessions: [SessionInfo] = []
-        for file in files where file.hasSuffix(".json") {
-            let path = "\(sessionsDir)/\(file)"
-            guard let data = fm.contents(atPath: path),
-                let session = try? JSONDecoder().decode(SessionInfo.self, from: data)
-            else { continue }
-            currentSessions.append(session)
-        }
-        guard !currentSessions.isEmpty else { return }
-
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        ioQueue.async { [weak self] in
             guard let self = self else { return }
-            var deadSessionIds: [String] = []
+            // Read raw files from disk instead of using aggregated `sessions` property,
+            // so every session file gets liveness-checked (not just deduplicated ones)
+            let fm = FileManager.default
+            guard let files = try? fm.contentsOfDirectory(atPath: self.sessionsDir) else { return }
+            var currentSessions: [SessionInfo] = []
+            for file in files where file.hasSuffix(".json") {
+                let path = "\(self.sessionsDir)/\(file)"
+                guard let data = fm.contents(atPath: path),
+                    let session = try? JSONDecoder().decode(SessionInfo.self, from: data)
+                else { continue }
+                currentSessions.append(session)
+            }
+            guard !currentSessions.isEmpty else { return }
 
-            // --- Primary liveness: JSONL mtime check for ALL sessions ---
-            // Also separate sessions without JSONL by terminal type for fallback checks
-            var ttyMap: [String: [String]] = [:]  // ttyName -> [session_id]
-            var itermSessions: [(id: String, termSid: String)] = []
-            var noInfoSessions: [SessionInfo] = []
+            // Capture state snapshots for background processing
+            let capturedInferredDead = self.inferredDeadIds
+            let capturedPreBootDead = self.preBootDeadIds
 
-            for session in currentSessions {
-                // Skip already-dead sessions (on disk or in memory)
-                if session.status == "dead" { continue }
-                if self.inferredDeadIds.contains(session.session_id) { continue }
-                if self.preBootDeadIds.contains(session.session_id) { continue }
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self = self else { return }
+                var deadSessionIds: [String] = []
+
+                // --- Primary liveness: JSONL mtime check for ALL sessions ---
+                // Also separate sessions without JSONL by terminal type for fallback checks
+                var ttyMap: [String: [String]] = [:]  // ttyName -> [session_id]
+                var itermSessions: [(id: String, termSid: String)] = []
+                var noInfoSessions: [SessionInfo] = []
+
+                for session in currentSessions {
+                    // Skip already-dead sessions (on disk or in memory)
+                    if session.status == "dead" { continue }
+                    if capturedInferredDead.contains(session.session_id) { continue }
+                    if capturedPreBootDead.contains(session.session_id) { continue }
                 // Skip "starting" sessions — they're brand new, may not have JSONL yet
                 if session.status == "starting" && !session.isStale { continue }
 
@@ -735,7 +742,7 @@ class SessionReader: ObservableObject {
             }
 
             // Also cascade: mark child sessions as dead when their parent is dead
-            let deadSet = newDeadIds.union(self.inferredDeadIds)
+            let deadSet = newDeadIds.union(capturedInferredDead)
             for session in currentSessions {
                 guard let parentSid = session.parent_session_id,
                       session.status != "dead",
@@ -745,11 +752,12 @@ class SessionReader: ObservableObject {
                       session.session_id, parentSid)
             }
 
-            // Update in-memory set and refresh UI on main thread
-            DispatchQueue.main.async {
+            // Update in-memory set on ioQueue and refresh
+            self.ioQueue.async {
                 self.inferredDeadIds = newDeadIds
-                self.readSessions()
             }
+            self.readSessions()
+        }
         }
     }
 
@@ -789,13 +797,23 @@ class SessionReader: ObservableObject {
 
     /// Hide a session from the UI. It will reappear if its updated_at changes (new activity).
     func hideSession(_ id: String, updatedAt: String) {
-        hiddenSessionIds.insert(id)
-        hiddenAtUpdatedAt[id] = updatedAt
-        // Immediately remove from published list
+        ioQueue.async { [weak self] in
+            self?.hiddenSessionIds.insert(id)
+            self?.hiddenAtUpdatedAt[id] = updatedAt
+        }
+        // Immediately remove from published list on main thread
         sessions.removeAll { $0.session_id == id }
     }
 
     func readSessions() {
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            self._readSessionsOnIOQueue()
+        }
+    }
+
+    /// Actual readSessions implementation — must be called on ioQueue.
+    private func _readSessionsOnIOQueue() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else {
             DispatchQueue.main.async { self.sessions = [] }
@@ -1021,6 +1039,13 @@ class SessionReader: ObservableObject {
                 return a.updated_at > b.updated_at  // ISO8601 sorts lexicographically
             }!
             var merged = best
+            // Use first non-empty terminal info
+            if merged.terminal.isEmpty {
+                if let withTerminal = group.first(where: { !$0.terminal.isEmpty }) {
+                    merged.terminal = withTerminal.terminal
+                    merged.terminal_session_id = withTerminal.terminal_session_id
+                }
+            }
             // Use first non-empty description
             if merged.last_prompt.isEmpty {
                 merged.last_prompt =
@@ -1512,7 +1537,19 @@ func switchToGhostty(cwd: String, ttyPath: String, sessionId: String = "") {
 }
 
 func switchByTerminalCwd(cwd: String) {
-    // Fallback: just activate the terminal app
+    // Fallback: detect which terminal is running and activate it
+    // Prefer Ghostty (with CWD matching) over a plain activate
+    if NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first != nil {
+        switchToGhostty(cwd: cwd, ttyPath: "")
+        return
+    }
+    if NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.googlecode.iterm2" }) {
+        if let appleScript = NSAppleScript(source: "tell application \"iTerm2\" to activate") {
+            var error: NSDictionary?
+            appleScript.executeAndReturnError(&error)
+        }
+        return
+    }
     if let appleScript = NSAppleScript(source: "tell application \"Terminal\" to activate") {
         var error: NSDictionary?
         appleScript.executeAndReturnError(&error)
