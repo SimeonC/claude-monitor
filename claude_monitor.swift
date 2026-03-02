@@ -324,22 +324,12 @@ class SessionReader: ObservableObject {
     private var refreshTimer: Timer?
     private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
-    /// Last known stable status per session (working/idle/attention) for suppressing transient flicker
-    private var lastStableStatus: [String: String] = [:]
-    /// Full SessionInfo snapshot for re-injecting disappeared sessions during grace period
-    private var lastStableSession: [String: SessionInfo] = [:]
-    /// When a transient status (shutting_down/starting) was first seen, for grace period timing
-    private var transientSince: [String: Date] = [:]
     /// Sessions hidden by user via X button; auto-unhidden when session's updated_at changes
     private var hiddenSessionIds: Set<String> = []
     /// The updated_at value at the time the session was hidden (to detect activity)
     private var hiddenAtUpdatedAt: [String: String] = [:]
     /// JSONL-derived data held in memory (never written to session files)
     private var derivedData: [String: DerivedSessionData] = [:]
-    /// Sessions inferred dead by liveness checks (held in memory, not written to files)
-    private var inferredDeadIds: Set<String> = []
-    /// Sessions from before last boot (held in memory, not written to files)
-    private var preBootDeadIds: Set<String> = []
     /// Serial queue for all disk I/O and state mutations (keeps main thread free for UI)
     private let ioQueue = DispatchQueue(label: "com.claudemonitor.sessionio", qos: .userInitiated)
 
@@ -371,20 +361,20 @@ class SessionReader: ObservableObject {
         }
 
         // Liveness timer: prune dead sessions (absence of writes can't trigger FSEvents)
-        livenessTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) {
+        livenessTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) {
             [weak self] _ in
             self?.pruneDeadSessions()
         }
 
         // Periodic refresh: pick up changes even if FSEvents misses them
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) {
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) {
             [weak self] _ in
             self?.scanProjects()
             self?.readSessions()
         }
     }
 
-    /// Collect session IDs last updated before the most recent boot into preBootDeadIds (memory-only)
+    /// Delete session files last updated before the most recent boot.
     private func prunePreBootSessions() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
@@ -399,7 +389,6 @@ class SessionReader: ObservableObject {
 
         let output =
             String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        // Format: "{ sec = 1234567890, usec = 123456 } ..."
         guard let secRange = output.range(of: "sec = "),
             let secEnd = output[secRange.upperBound...].firstIndex(of: ","),
             let bootEpoch = TimeInterval(
@@ -424,25 +413,24 @@ class SessionReader: ObservableObject {
                 updated = isoFormatter.date(from: session.updated_at)
             }
             if let updated = updated, updated < bootTime {
-                preBootDeadIds.insert(session.session_id)
+                try? fm.removeItem(atPath: path)
+                try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
+                try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
                 NSLog(
-                    "[ClaudeMonitor] Pre-boot session %@ (updated %@) — will hide from UI",
+                    "[ClaudeMonitor] Pre-boot session %@ (updated %@) — deleted",
                     session.session_id, session.updated_at)
             }
         }
     }
 
-    /// Collect legacy `discovered-*` session IDs into preBootDeadIds (memory-only).
+    /// Delete legacy `discovered-*` session files.
     private func cleanupLegacyDiscoveredSessions() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
         for file in files where file.hasPrefix("discovered-") && file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
-            if let data = fm.contents(atPath: path),
-               let session = try? JSONDecoder().decode(SessionInfo.self, from: data) {
-                preBootDeadIds.insert(session.session_id)
-            }
-            NSLog("[ClaudeMonitor] Legacy discovered session %@ — will hide from UI", file)
+            try? fm.removeItem(atPath: path)
+            NSLog("[ClaudeMonitor] Legacy discovered session %@ — deleted", file)
         }
     }
 
@@ -580,184 +568,172 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Detect dead sessions and collect their IDs in memory (no file writes).
+    /// Detect dead sessions and delete their files from disk.
     func pruneDeadSessions() {
         ioQueue.async { [weak self] in
             guard let self = self else { return }
-            // Read raw files from disk instead of using aggregated `sessions` property,
-            // so every session file gets liveness-checked (not just deduplicated ones)
             let fm = FileManager.default
             guard let files = try? fm.contentsOfDirectory(atPath: self.sessionsDir) else { return }
-            var currentSessions: [SessionInfo] = []
+            var currentSessions: [(session: SessionInfo, path: String)] = []
             for file in files where file.hasSuffix(".json") {
                 let path = "\(self.sessionsDir)/\(file)"
                 guard let data = fm.contents(atPath: path),
                     let session = try? JSONDecoder().decode(SessionInfo.self, from: data)
                 else { continue }
-                currentSessions.append(session)
+                currentSessions.append((session, path))
             }
             guard !currentSessions.isEmpty else { return }
 
-            // Capture state snapshots for background processing
-            let capturedInferredDead = self.inferredDeadIds
-            let capturedPreBootDead = self.preBootDeadIds
-
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 guard let self = self else { return }
-                var deadSessionIds: [String] = []
+                var deadSessionIds: Set<String> = []
 
-                // --- Primary liveness: JSONL mtime check for ALL sessions ---
-                // Also separate sessions without JSONL by terminal type for fallback checks
-                var ttyMap: [String: [String]] = [:]  // ttyName -> [session_id]
+                var ttyMap: [String: [String]] = [:]
                 var itermSessions: [(id: String, termSid: String)] = []
                 var noInfoSessions: [SessionInfo] = []
 
-                for session in currentSessions {
-                    // Skip already-dead sessions (on disk or in memory)
+                for (session, _) in currentSessions {
                     if session.status == "dead" { continue }
-                    if capturedInferredDead.contains(session.session_id) { continue }
-                    if capturedPreBootDead.contains(session.session_id) { continue }
-                // Skip "starting" sessions — they're brand new, may not have JSONL yet
-                if session.status == "starting" && !session.isStale { continue }
+                    if session.status == "starting" && !session.isStale { continue }
 
-                // First try JSONL mtime — most reliable per-session check
-                if let jsonlPath = self.findJSONLPath(sessionId: session.session_id),
-                    let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath),
-                    let mtime = attrs[.modificationDate] as? Date
-                {
-                    // Prune any session whose JSONL is older than 12 hours
-                    let age = Date().timeIntervalSince(mtime)
-                    if age > 43200 {
-                        deadSessionIds.append(session.session_id)
+                    if let jsonlPath = self.findJSONLPath(sessionId: session.session_id),
+                        let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath),
+                        let mtime = attrs[.modificationDate] as? Date
+                    {
+                        if Date().timeIntervalSince(mtime) > 43200 {
+                            deadSessionIds.insert(session.session_id)
+                        }
+                        continue
                     }
-                    continue
-                }
 
-                // No JSONL found — use terminal-based fallback
-                if session.terminal_session_id.isEmpty {
-                    noInfoSessions.append(session)
-                } else if session.terminal == "iterm2" {
-                    itermSessions.append((session.session_id, session.terminal_session_id))
-                } else {
-                    let ttyName = session.terminal_session_id.replacingOccurrences(
-                        of: "/dev/", with: "")
-                    ttyMap[ttyName, default: []].append(session.session_id)
-                }
-            }
-
-            // --- Fallback: Terminal/Ghostty TTY check (only for sessions without JSONL) ---
-            if !ttyMap.isEmpty {
-                let ttys = ttyMap.keys.joined(separator: " ")
-                let script =
-                    "for tty in \(ttys); do ps -t \"$tty\" -o comm= 2>/dev/null | grep -q claude || echo \"$tty\"; done"
-                if let output = self.runShell(script) {
-                    for tty in output.split(separator: "\n").map(String.init) {
-                        if let sids = ttyMap[tty] { deadSessionIds.append(contentsOf: sids) }
+                    if session.terminal_session_id.isEmpty {
+                        noInfoSessions.append(session)
+                    } else if session.terminal == "iterm2" {
+                        itermSessions.append((session.session_id, session.terminal_session_id))
+                    } else {
+                        let ttyName = session.terminal_session_id.replacingOccurrences(
+                            of: "/dev/", with: "")
+                        ttyMap[ttyName, default: []].append(session.session_id)
                     }
                 }
-            }
 
-            // --- Fallback: iTerm2 check (only for sessions without JSONL) ---
-            if !itermSessions.isEmpty {
-                let itermRunning = NSWorkspace.shared.runningApplications.contains {
-                    $0.bundleIdentifier == "com.googlecode.iterm2"
-                }
-                if !itermRunning {
-                    deadSessionIds.append(contentsOf: itermSessions.map(\.id))
-                } else {
-                    var guidToSessionId: [String: String] = [:]
-                    for s in itermSessions {
-                        let parts = s.termSid.split(separator: ":")
-                        if parts.count >= 2 {
-                            guidToSessionId[String(parts[1])] = s.id
+                // --- Fallback: Terminal/Ghostty TTY check ---
+                if !ttyMap.isEmpty {
+                    let ttys = ttyMap.keys.joined(separator: " ")
+                    let script =
+                        "for tty in \(ttys); do ps -t \"$tty\" -o comm= 2>/dev/null | grep -q claude || echo \"$tty\"; done"
+                    if let output = self.runShell(script) {
+                        for tty in output.split(separator: "\n").map(String.init) {
+                            if let sids = ttyMap[tty] { deadSessionIds.formUnion(sids) }
                         }
                     }
+                }
 
-                    if !guidToSessionId.isEmpty {
-                        let script = """
-                            tell application "iTerm2"
-                                set results to ""
-                                repeat with w in windows
-                                    repeat with t in tabs of w
-                                        repeat with s in sessions of t
-                                            try
-                                                set results to results & (unique ID of s) & "\t" & (tty of s) & "\n"
-                                            end try
+                // --- Fallback: iTerm2 check ---
+                if !itermSessions.isEmpty {
+                    let itermRunning = NSWorkspace.shared.runningApplications.contains {
+                        $0.bundleIdentifier == "com.googlecode.iterm2"
+                    }
+                    if !itermRunning {
+                        deadSessionIds.formUnion(itermSessions.map(\.id))
+                    } else {
+                        var guidToSessionId: [String: String] = [:]
+                        for s in itermSessions {
+                            let parts = s.termSid.split(separator: ":")
+                            if parts.count >= 2 {
+                                guidToSessionId[String(parts[1])] = s.id
+                            }
+                        }
+
+                        if !guidToSessionId.isEmpty {
+                            let script = """
+                                tell application "iTerm2"
+                                    set results to ""
+                                    repeat with w in windows
+                                        repeat with t in tabs of w
+                                            repeat with s in sessions of t
+                                                try
+                                                    set results to results & (unique ID of s) & "\t" & (tty of s) & "\n"
+                                                end try
+                                            end repeat
                                         end repeat
                                     end repeat
-                                end repeat
-                                return results
-                            end tell
-                            """
-                        let task = Process()
-                        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                        task.arguments = ["-e", script]
-                        let pipe = Pipe()
-                        task.standardOutput = pipe
-                        task.standardError = FileHandle.nullDevice
-                        if (try? task.run()) != nil {
-                            task.waitUntilExit()
-                            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                            let output = String(data: data, encoding: .utf8) ?? ""
+                                    return results
+                                end tell
+                                """
+                            let task = Process()
+                            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                            task.arguments = ["-e", script]
+                            let pipe = Pipe()
+                            task.standardOutput = pipe
+                            task.standardError = FileHandle.nullDevice
+                            if (try? task.run()) != nil {
+                                task.waitUntilExit()
+                                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                                let output = String(data: data, encoding: .utf8) ?? ""
 
-                            var liveGuids: Set<String> = []
-                            for line in output.split(separator: "\n") {
-                                let cols = line.split(separator: "\t", maxSplits: 1)
-                                guard cols.count == 2 else { continue }
-                                let guid = String(cols[0])
-                                guard guidToSessionId[guid] != nil else { continue }
-                                let ttyName = cols[1].replacingOccurrences(of: "/dev/", with: "")
-                                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                                let check =
-                                    "ps -t \"\(ttyName)\" -o comm= 2>/dev/null | grep -q claude && echo LIVE"
-                                if let result = self.runShell(check),
-                                    result.trimmingCharacters(in: .whitespacesAndNewlines) == "LIVE"
-                                {
-                                    liveGuids.insert(guid)
+                                var liveGuids: Set<String> = []
+                                for line in output.split(separator: "\n") {
+                                    let cols = line.split(separator: "\t", maxSplits: 1)
+                                    guard cols.count == 2 else { continue }
+                                    let guid = String(cols[0])
+                                    guard guidToSessionId[guid] != nil else { continue }
+                                    let ttyName = cols[1].replacingOccurrences(of: "/dev/", with: "")
+                                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    let check =
+                                        "ps -t \"\(ttyName)\" -o comm= 2>/dev/null | grep -q claude && echo LIVE"
+                                    if let result = self.runShell(check),
+                                        result.trimmingCharacters(in: .whitespacesAndNewlines) == "LIVE"
+                                    {
+                                        liveGuids.insert(guid)
+                                    }
                                 }
-                            }
 
-                            for (guid, sid) in guidToSessionId where !liveGuids.contains(guid) {
-                                deadSessionIds.append(sid)
+                                for (guid, sid) in guidToSessionId where !liveGuids.contains(guid) {
+                                    deadSessionIds.insert(sid)
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // --- Fallback: no JSONL and no terminal info → use staleness ---
-            for session in noInfoSessions where session.isStale {
-                deadSessionIds.append(session.session_id)
-            }
-
-            // Collect dead IDs into memory (skip team leads with active agents)
-            var newDeadIds: Set<String> = []
-            for sid in deadSessionIds {
-                if self.sessionHasActiveTeam(sid) {
-                    NSLog("[ClaudeMonitor] Skipping prune of team lead %@ (has active agents)", sid)
-                    continue
+                // --- Fallback: no JSONL and no terminal info → use staleness ---
+                for session in noInfoSessions where session.isStale {
+                    deadSessionIds.insert(session.session_id)
                 }
-                newDeadIds.insert(sid)
-                NSLog("[ClaudeMonitor] Inferred dead session %@", sid)
-            }
 
-            // Also cascade: mark child sessions as dead when their parent is dead
-            let deadSet = newDeadIds.union(capturedInferredDead)
-            for session in currentSessions {
-                guard let parentSid = session.parent_session_id,
-                      session.status != "dead",
-                      deadSet.contains(parentSid) else { continue }
-                newDeadIds.insert(session.session_id)
-                NSLog("[ClaudeMonitor] Inferred child session %@ dead (parent %@ is dead)",
-                      session.session_id, parentSid)
-            }
+                // Skip team leads with active agents
+                for sid in Array(deadSessionIds) {
+                    if self.sessionHasActiveTeam(sid) {
+                        NSLog("[ClaudeMonitor] Skipping prune of team lead %@ (has active agents)", sid)
+                        deadSessionIds.remove(sid)
+                    }
+                }
 
-            // Update in-memory set on ioQueue and refresh
-            self.ioQueue.async {
-                self.inferredDeadIds = newDeadIds
+                // Cascade: delete child sessions when parent is dead
+                for (session, _) in currentSessions {
+                    guard let parentSid = session.parent_session_id,
+                          session.status != "dead",
+                          deadSessionIds.contains(parentSid) else { continue }
+                    deadSessionIds.insert(session.session_id)
+                    NSLog("[ClaudeMonitor] Child session %@ dead (parent %@ is dead)",
+                          session.session_id, parentSid)
+                }
+
+                // Delete dead session files from disk
+                let sessionsDir = self.sessionsDir
+                self.ioQueue.async {
+                    let fm = FileManager.default
+                    for sid in deadSessionIds {
+                        let path = "\(sessionsDir)/\(sid).json"
+                        try? fm.removeItem(atPath: path)
+                        try? fm.removeItem(atPath: "\(sessionsDir)/\(sid).context")
+                        try? fm.removeItem(atPath: "\(sessionsDir)/\(sid).model")
+                        NSLog("[ClaudeMonitor] Deleted dead session %@", sid)
+                    }
+                }
+                self.readSessions()
             }
-            self.readSessions()
-        }
         }
     }
 
@@ -830,28 +806,12 @@ class SessionReader: ObservableObject {
             guard let data = fm.contents(atPath: path) else { continue }
             do {
                 var session = try JSONDecoder().decode(SessionInfo.self, from: data)
-                // Never show dead sessions (hook-written OR in-memory)
-                if session.status == "dead" { continue }
-                if preBootDeadIds.contains(session.session_id) { continue }
-                // If a session in inferredDeadIds was updated by a hook recently, resurrect it
-                if inferredDeadIds.contains(session.session_id) {
-                    if let attrs = try? fm.attributesOfItem(atPath: path),
-                       let mtime = attrs[.modificationDate] as? Date,
-                       now.timeIntervalSince(mtime) < 30 {
-                        inferredDeadIds.remove(session.session_id)
-                    } else {
-                        continue
-                    }
-                }
-                // Hide shutting_down sessions after 30s (file stays for potential resume)
-                if session.status == "shutting_down" {
-                    isoFmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                    var updDate = isoFmt.date(from: session.updated_at)
-                    if updDate == nil {
-                        isoFmt.formatOptions = [.withInternetDateTime]
-                        updDate = isoFmt.date(from: session.updated_at)
-                    }
-                    if let d = updDate, now.timeIntervalSince(d) > 30 { continue }
+                // Dead sessions: delete from disk and skip
+                if session.status == "dead" {
+                    try? fm.removeItem(atPath: path)
+                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
+                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
+                    continue
                 }
                 // Read context_pct from sidecar file
                 let contextPath = "\(sessionsDir)/\(session.session_id).context"
@@ -893,8 +853,6 @@ class SessionReader: ObservableObject {
         let nowString = isoFmt.string(from: now)
         for (sessionId, derived) in derivedData {
             guard !loadedIds.contains(sessionId),
-                  !preBootDeadIds.contains(sessionId),
-                  !inferredDeadIds.contains(sessionId),
                   let mtime = derived.jsonlMtime,
                   now.timeIntervalSince(mtime) < 30
             else { continue }
@@ -907,62 +865,6 @@ class SessionReader: ObservableObject {
                 agent_count: derived.agentCount
             )
             loaded.append(session)
-        }
-
-        // Debug: capture pre-stabilization state
-        let debugPreStabilize = loaded.map { "\($0.session_id.prefix(8)):\($0.status)" }
-
-        // Stabilize transient statuses to prevent flicker during plan mode exit.
-        // Plan mode exit fires SessionEnd → SessionStart → tool hooks in rapid succession,
-        // causing brief "shutting_down" → "starting" → "working" transitions, or the
-        // session file may briefly become "dead"/absent before a new one appears.
-        // Suppress transient states and re-inject disappeared sessions for a 3s grace period.
-        let stableStatuses: Set<String> = ["working", "idle", "attention"]
-        let transientStatuses: Set<String> = ["shutting_down", "starting"]
-
-        // Re-inject sessions that disappeared but were recently stable
-        for (sid, status) in lastStableStatus {
-            guard !loadedIds.contains(sid) else { continue }
-            if transientSince[sid] == nil {
-                transientSince[sid] = now
-            }
-            if now.timeIntervalSince(transientSince[sid]!) < 3.0,
-               let cached = lastStableSession[sid] {
-                var ghost = cached
-                ghost.status = status
-                loaded.append(ghost)
-            }
-        }
-
-        for i in loaded.indices {
-            let sid = loaded[i].session_id
-            // Skip ghost sessions — they must not reset transientSince, otherwise
-            // the 3-second grace period never expires and ghosts persist indefinitely.
-            if !loadedIds.contains(sid) { continue }
-            if stableStatuses.contains(loaded[i].status) {
-                lastStableStatus[sid] = loaded[i].status
-                lastStableSession[sid] = loaded[i]
-                transientSince.removeValue(forKey: sid)
-            } else if transientStatuses.contains(loaded[i].status),
-                      let prev = lastStableStatus[sid] {
-                if transientSince[sid] == nil {
-                    transientSince[sid] = now
-                }
-                if now.timeIntervalSince(transientSince[sid]!) < 3.0 {
-                    loaded[i].status = prev
-                }
-            }
-        }
-        // Clean up tracking for sessions gone longer than grace period
-        let allIds = Set(loaded.map(\.session_id))
-        for sid in Array(lastStableStatus.keys) {
-            if !allIds.contains(sid) {
-                if let since = transientSince[sid], now.timeIntervalSince(since) >= 3.0 {
-                    lastStableStatus.removeValue(forKey: sid)
-                    lastStableSession.removeValue(forKey: sid)
-                    transientSince.removeValue(forKey: sid)
-                }
-            }
         }
 
         // --- Sub-agent aggregation: propagate child attention to parent, hide child rows ---
@@ -1099,15 +1001,8 @@ class SessionReader: ObservableObject {
             $0.project.localizedCaseInsensitiveCompare($1.project) == .orderedAscending
         }
 
-        // Debug: capture post-stabilization / pre-aggregation state
-        let debugPostStabilize = loaded.map { "\($0.session_id.prefix(8)):\($0.status)" }
-
         // Debug: dump pipeline state to JSON for diagnosing status bugs
-        dumpDebugState(
-            preStabilize: debugPreStabilize,
-            postStabilize: debugPostStabilize,
-            aggregated: aggregated
-        )
+        dumpDebugState(aggregated: aggregated)
 
         DispatchQueue.main.async {
             self.sessions = aggregated
@@ -1115,23 +1010,14 @@ class SessionReader: ObservableObject {
     }
 
     /// Write current pipeline state to ~/.claude/monitor/debug.json for diagnosis.
-    private func dumpDebugState(preStabilize: [String], postStabilize: [String], aggregated: [SessionInfo]) {
+    private func dumpDebugState(aggregated: [SessionInfo]) {
         let debugPath = "\(sessionsDir)/../debug.json"
         let isoFmt = ISO8601DateFormatter()
         isoFmt.formatOptions = [.withInternetDateTime]
         let nowStr = isoFmt.string(from: Date())
 
         var debugDict: [String: Any] = ["timestamp": nowStr]
-
-        // inferredDeadIds and preBootDeadIds
-        debugDict["inferredDeadIds"] = Array(inferredDeadIds).sorted()
-        debugDict["preBootDeadIds"] = Array(preBootDeadIds).sorted()
         debugDict["hiddenSessionIds"] = Array(hiddenSessionIds).sorted()
-
-        // lastStableStatus
-        debugDict["lastStableStatus"] = lastStableStatus
-        debugDict["preStabilize"] = preStabilize
-        debugDict["postStabilize"] = postStabilize
 
         // Final aggregated sessions (what the UI shows)
         debugDict["sessions"] = aggregated.map { s -> [String: Any] in

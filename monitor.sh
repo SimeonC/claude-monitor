@@ -104,11 +104,11 @@ if [ "$IS_SUBAGENT" = "true" ]; then
             if ensure_subagent_file; then
                 if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
                     jq --arg updated "$NOW" \
-                        'if .status == "dead" then . else .status = "idle" | .updated_at = $updated end' \
+                        '.status = "idle" | .updated_at = $updated' \
                         "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
                 elif [ "$NOTIF_TYPE" = "permission_prompt" ]; then
                     jq --arg updated "$NOW" \
-                        'if .status == "dead" then . else .status = "attention" | .updated_at = $updated end' \
+                        '.status = "attention" | .updated_at = $updated' \
                         "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
                 fi
             fi
@@ -116,15 +116,13 @@ if [ "$IS_SUBAGENT" = "true" ]; then
         PreToolUse|PostToolUse|PostToolUseFailure)
             if ensure_subagent_file; then
                 jq --arg updated "$NOW" \
-                    'if .status == "dead" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
+                    'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
                     "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
             fi
             ;;
         Stop)
-            if ensure_subagent_file; then
-                jq --arg updated "$NOW" \
-                    'if .status == "dead" then . else .status = "idle" | .updated_at = $updated end' \
-                    "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+            if find_subagent_session_file && [ -f "$SUBAGENT_SESSION_FILE" ]; then
+                rm -f "$SUBAGENT_SESSION_FILE"
             fi
             ;;
         *)
@@ -211,9 +209,9 @@ cleanup_same_terminal() {
         local fid
         fid=$(basename "$f" .json)
         [ "$fid" = "$SESSION_ID" ] && continue
-        # Mark as dead if same terminal_session_id
+        # Delete if same terminal_session_id (stale session in this tab)
         if jq -e --arg tid "$TERM_SID" '.terminal_session_id == $tid' "$f" >/dev/null 2>&1; then
-            jq '.status = "dead"' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+            rm -f "$f" "$SESSIONS_DIR/${fid}.context" "$SESSIONS_DIR/${fid}.model"
         fi
     done
 }
@@ -234,10 +232,10 @@ case "$EVENT" in
     SessionStart)
         cleanup_same_terminal
         if [ -f "$SESSION_FILE" ]; then
-            # Session file exists — backfill terminal and reboot if shutting_down/dead
+            # Session file exists — backfill terminal and reboot if dead
             backfill_terminal
             CURRENT_STATUS=$(jq -r '.status // ""' "$SESSION_FILE")
-            if [ "$CURRENT_STATUS" = "shutting_down" ] || [ "$CURRENT_STATUS" = "dead" ]; then
+            if [ "$CURRENT_STATUS" = "dead" ]; then
                 jq \
                     --arg status "idle" \
                     --arg updated "$NOW" \
@@ -297,15 +295,8 @@ case "$EVENT" in
         ;;
 
     SessionEnd)
-        # Session is shutting down — backfill terminal info and mark as shutting_down
-        backfill_terminal
-        if [ -f "$SESSION_FILE" ]; then
-            jq \
-                --arg status "shutting_down" \
-                --arg updated "$NOW" \
-                '.status = $status | .updated_at = $updated' \
-                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
-        fi
+        # Session ended — delete session and sidecar files
+        rm -f "$SESSION_FILE" "$SESSIONS_DIR/${SESSION_ID}.context" "$SESSIONS_DIR/${SESSION_ID}.model"
         ;;
 
     SubagentStart)
@@ -315,16 +306,11 @@ case "$EVENT" in
         ;;
 
     SubagentStop)
-        # Sub-agent finished — update parent status to working
-        # Also mark the sub-agent's session file as dead if we can find it
+        # Sub-agent finished — delete its session file, update parent to working
         AGENT_TRANSCRIPT=$(echo "$INPUT" | jq -r '.agent_transcript_path // empty')
         if [ -n "$AGENT_TRANSCRIPT" ]; then
             local_filename=$(basename "$AGENT_TRANSCRIPT" .jsonl)
-            local_subagent_file="$SESSIONS_DIR/sub-${local_filename}.json"
-            if [ -f "$local_subagent_file" ]; then
-                jq --arg updated "$NOW" '.status = "dead" | .updated_at = $updated' \
-                    "$local_subagent_file" > "${local_subagent_file}.tmp" && mv "${local_subagent_file}.tmp" "$local_subagent_file"
-            fi
+            rm -f "$SESSIONS_DIR/sub-${local_filename}.json"
         fi
         backfill_terminal
         set_working
