@@ -18,6 +18,34 @@ MONITOR_DIR="$HOME/.claude/monitor"
 SESSIONS_DIR="$MONITOR_DIR/sessions"
 mkdir -p "$SESSIONS_DIR"
 
+# --- Atomic JSON update helper ---
+# Reads file content into memory THEN pipes to jq, so concurrent invocations
+# can't read a partially-replaced file. Uses mkdir as a portable spinlock.
+# Usage: update_json_file <file> <jq_args...>
+update_json_file() {
+    local file="$1"; shift
+    local lockdir="${file}.lock"
+    # Spin-acquire lock (mkdir is atomic on POSIX)
+    local i=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -ge 50 ]; then
+            # Stale lock — force break after 500ms
+            rm -rf "$lockdir"
+            mkdir "$lockdir" 2>/dev/null || return 1
+            break
+        fi
+        sleep 0.01
+    done
+    local content
+    content=$(cat "$file" 2>/dev/null) || { rm -rf "$lockdir"; return 1; }
+    if [ -z "$content" ]; then rm -rf "$lockdir"; return 1; fi
+    local result
+    result=$(echo "$content" | jq "$@") || { rm -rf "$lockdir"; return 1; }
+    echo "$result" > "${file}.tmp" && mv "${file}.tmp" "$file"
+    rm -rf "$lockdir"
+}
+
 # --- Extract context from hook JSON ---
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
@@ -103,21 +131,18 @@ if [ "$IS_SUBAGENT" = "true" ]; then
             NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
             if ensure_subagent_file; then
                 if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
-                    jq --arg updated "$NOW" \
-                        '.status = "idle" | .updated_at = $updated' \
-                        "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+                    update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
+                        '.status = "idle" | .updated_at = $updated'
                 elif [ "$NOTIF_TYPE" = "permission_prompt" ]; then
-                    jq --arg updated "$NOW" \
-                        '.status = "attention" | .updated_at = $updated' \
-                        "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+                    update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
+                        '.status = "attention" | .updated_at = $updated'
                 fi
             fi
             ;;
         PreToolUse|PostToolUse|PostToolUseFailure)
             if ensure_subagent_file; then
-                jq --arg updated "$NOW" \
-                    'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
-                    "$SUBAGENT_SESSION_FILE" > "${SUBAGENT_SESSION_FILE}.tmp" && mv "${SUBAGENT_SESSION_FILE}.tmp" "$SUBAGENT_SESSION_FILE"
+                update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
+                    'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
             fi
             ;;
         Stop)
@@ -176,9 +201,12 @@ TERM_INFO=$(detect_terminal)
 TERM_APP=$(echo "$TERM_INFO" | cut -d'|' -f1)
 TERM_SID=$(echo "$TERM_INFO" | cut -d'|' -f2)
 
-# Helper: create session file if missing (hooks bootstrap it on first event after monitor restart)
+# Helper: create session file if missing or corrupt (hooks bootstrap it on first event after monitor restart)
 ensure_session_file() {
-    [ -f "$SESSION_FILE" ] && return 0
+    # Check file exists AND has valid JSON (empty/corrupt files need recreation)
+    if [ -f "$SESSION_FILE" ] && [ -s "$SESSION_FILE" ] && jq -e . "$SESSION_FILE" >/dev/null 2>&1; then
+        return 0
+    fi
     jq -n \
         --arg sid "$SESSION_ID" --arg status "idle" \
         --arg project "$PROJECT" --arg cwd "${CWD:-}" \
@@ -193,12 +221,11 @@ backfill_terminal() {
     ensure_session_file
     [ -f "$SESSION_FILE" ] || return 0
     [ -z "$TERM_APP" ] && return 0
-    jq \
+    update_json_file "$SESSION_FILE" \
         --arg updated "$NOW" \
         --arg terminal "$TERM_APP" \
         --arg term_sid "$TERM_SID" \
-        '.updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end' \
-        "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+        '.updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end'
 }
 
 # Helper: mark stale session files for the same terminal tab as dead (different session_id)
@@ -221,26 +248,24 @@ cleanup_same_terminal() {
 set_working() {
     ensure_session_file
     [ -f "$SESSION_FILE" ] || return 0
-    jq \
+    update_json_file "$SESSION_FILE" \
         --arg updated "$NOW" \
-        'if .status == "dead" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end' \
-        "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+        'if .status == "dead" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
 }
 
 # --- Handle events ---
 case "$EVENT" in
     SessionStart)
         cleanup_same_terminal
-        if [ -f "$SESSION_FILE" ]; then
+        if [ -f "$SESSION_FILE" ] && [ -s "$SESSION_FILE" ]; then
             # Session file exists — backfill terminal and reboot if dead
             backfill_terminal
-            CURRENT_STATUS=$(jq -r '.status // ""' "$SESSION_FILE")
+            CURRENT_STATUS=$(jq -r '.status // ""' "$SESSION_FILE" 2>/dev/null)
             if [ "$CURRENT_STATUS" = "dead" ]; then
-                jq \
+                update_json_file "$SESSION_FILE" \
                     --arg status "idle" \
                     --arg updated "$NOW" \
-                    '.status = $status | .updated_at = $updated' \
-                    "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+                    '.status = $status | .updated_at = $updated'
             fi
         else
             # New session — create file with "starting" status
@@ -260,11 +285,10 @@ case "$EVENT" in
     Stop)
         ensure_session_file
         if [ -f "$SESSION_FILE" ]; then
-            jq \
+            update_json_file "$SESSION_FILE" \
                 --arg status "idle" \
                 --arg updated "$NOW" \
-                'if .status == "dead" then . else .status = $status | .updated_at = $updated end' \
-                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+                'if .status == "dead" then . else .status = $status | .updated_at = $updated end'
         fi
         ;;
 
@@ -274,23 +298,21 @@ case "$EVENT" in
         if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
             # idle_prompt means Claude is at the input prompt — set idle
             if [ -f "$SESSION_FILE" ]; then
-                jq \
+                update_json_file "$SESSION_FILE" \
                     --arg status "idle" \
                     --arg updated "$NOW" \
-                    'if .status == "dead" then . else .status = $status | .updated_at = $updated end' \
-                    "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+                    'if .status == "dead" then . else .status = $status | .updated_at = $updated end'
             fi
             exit 0
         fi
         # Non-idle notification = needs attention (permission prompt, etc.)
         if [ -f "$SESSION_FILE" ]; then
-            jq \
+            update_json_file "$SESSION_FILE" \
                 --arg status "attention" \
                 --arg updated "$NOW" \
                 --arg terminal "$TERM_APP" \
                 --arg term_sid "$TERM_SID" \
-                'if .status == "dead" then . else .status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end end' \
-                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+                'if .status == "dead" then . else .status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end end'
         fi
         ;;
 
@@ -322,10 +344,9 @@ case "$EVENT" in
         ensure_session_file
         backfill_terminal
         if [ -f "$SESSION_FILE" ]; then
-            jq \
+            update_json_file "$SESSION_FILE" \
                 --arg updated "$NOW" \
-                'if .status == "dead" then . else .status = "working" | .updated_at = $updated end' \
-                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+                'if .status == "dead" then . else .status = "working" | .updated_at = $updated end'
         fi
         ;;
 

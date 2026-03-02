@@ -807,6 +807,11 @@ class SessionReader: ObservableObject {
         for file in files where file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
             guard let data = fm.contents(atPath: path) else { continue }
+            // Delete empty/corrupt session files so the hook can recreate them
+            if data.isEmpty {
+                try? fm.removeItem(atPath: path)
+                continue
+            }
             do {
                 var session = try JSONDecoder().decode(SessionInfo.self, from: data)
                 // Dead sessions: delete from disk and skip
@@ -845,8 +850,9 @@ class SessionReader: ObservableObject {
                 loadedIds.insert(session.session_id)
             } catch {
                 NSLog(
-                    "[ClaudeMonitor] Skipping corrupt session file %@: %@", file,
+                    "[ClaudeMonitor] Deleting corrupt session file %@: %@", file,
                     error.localizedDescription)
+                try? fm.removeItem(atPath: path)
             }
         }
 
