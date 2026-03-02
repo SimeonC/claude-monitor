@@ -936,6 +936,9 @@ class SessionReader: ObservableObject {
 
         for i in loaded.indices {
             let sid = loaded[i].session_id
+            // Skip ghost sessions — they must not reset transientSince, otherwise
+            // the 3-second grace period never expires and ghosts persist indefinitely.
+            if !loadedIds.contains(sid) { continue }
             if stableStatuses.contains(loaded[i].status) {
                 lastStableStatus[sid] = loaded[i].status
                 lastStableSession[sid] = loaded[i]
