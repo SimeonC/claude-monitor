@@ -313,6 +313,7 @@ struct DerivedSessionData {
     var lastPrompt: String
     var agentCount: Int
     var jsonlMtime: Date?
+    var jsonlBirthDate: Date?
     var jsonlPath: String?
 }
 
@@ -553,12 +554,14 @@ class SessionReader: ObservableObject {
                         }
                     }
 
+                    let birthDate = attrs[.creationDate] as? Date
                     newDerived[sessionId] = DerivedSessionData(
                         project: project,
                         cwd: cwd,
                         lastPrompt: lastPrompt,
                         agentCount: agentCount,
                         jsonlMtime: mtime,
+                        jsonlBirthDate: birthDate,
                         jsonlPath: jsonlPath
                     )
                 }
@@ -847,20 +850,23 @@ class SessionReader: ObservableObject {
             }
         }
 
-        // Recovery: for derivedData entries with fresh JSONL but no session file,
-        // create in-memory SessionInfo (monitor restart recovery)
+        // Recovery: for derivedData entries with active JSONL but no session file,
+        // create in-memory SessionInfo (monitor restart recovery / session file not yet written).
+        // derivedData only holds JSONL modified within the last 2 minutes, so any entry here
+        // represents an active session. Use JSONL birth date as started_at proxy.
         isoFmt.formatOptions = [.withInternetDateTime]
         let nowString = isoFmt.string(from: now)
         for (sessionId, derived) in derivedData {
-            guard !loadedIds.contains(sessionId),
-                  let mtime = derived.jsonlMtime,
-                  now.timeIntervalSince(mtime) < 30
-            else { continue }
+            guard !loadedIds.contains(sessionId) else { continue }
+            // Use JSONL birth date as the best proxy for session start time.
+            // Fall back to mtime, then now (last resort).
+            let startDate = derived.jsonlBirthDate ?? derived.jsonlMtime ?? now
+            let startedAtString = isoFmt.string(from: startDate)
             let session = SessionInfo(
                 session_id: sessionId, status: "idle",
                 project: derived.project, cwd: derived.cwd,
                 terminal: "", terminal_session_id: "",
-                started_at: nowString, updated_at: nowString,
+                started_at: startedAtString, updated_at: nowString,
                 last_prompt: derived.lastPrompt,
                 agent_count: derived.agentCount
             )
