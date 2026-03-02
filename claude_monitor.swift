@@ -289,6 +289,17 @@ struct SessionInfo: Codable, Identifiable {
     }
 }
 
+// MARK: - Derived Session Data (in-memory, from JSONL scanning)
+
+struct DerivedSessionData {
+    var project: String
+    var cwd: String
+    var lastPrompt: String
+    var agentCount: Int
+    var jsonlMtime: Date?
+    var jsonlPath: String?
+}
+
 // MARK: - Session Reader (polls directory)
 
 class SessionReader: ObservableObject {
@@ -306,6 +317,12 @@ class SessionReader: ObservableObject {
     private var hiddenSessionIds: Set<String> = []
     /// The updated_at value at the time the session was hidden (to detect activity)
     private var hiddenAtUpdatedAt: [String: String] = [:]
+    /// JSONL-derived data held in memory (never written to session files)
+    private var derivedData: [String: DerivedSessionData] = [:]
+    /// Sessions inferred dead by liveness checks (held in memory, not written to files)
+    private var inferredDeadIds: Set<String> = []
+    /// Sessions from before last boot (held in memory, not written to files)
+    private var preBootDeadIds: Set<String> = []
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -345,7 +362,7 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Delete session files last updated before the most recent boot (survived an ungraceful shutdown)
+    /// Collect session IDs last updated before the most recent boot into preBootDeadIds (memory-only)
     private func prunePreBootSessions() {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
@@ -385,28 +402,25 @@ class SessionReader: ObservableObject {
                 updated = isoFormatter.date(from: session.updated_at)
             }
             if let updated = updated, updated < bootTime {
-                var dead = session
-                dead.status = "dead"
-                writeSessionFile(dead, to: path)
+                preBootDeadIds.insert(session.session_id)
                 NSLog(
-                    "[ClaudeMonitor] Marked pre-boot session %@ as dead (updated %@)", session.session_id,
-                    session.updated_at)
+                    "[ClaudeMonitor] Pre-boot session %@ (updated %@) — will hide from UI",
+                    session.session_id, session.updated_at)
             }
         }
     }
 
-    /// Mark legacy `discovered-*` session files as dead.
+    /// Collect legacy `discovered-*` session IDs into preBootDeadIds (memory-only).
     private func cleanupLegacyDiscoveredSessions() {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else { return }
         for file in files where file.hasPrefix("discovered-") && file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
             if let data = fm.contents(atPath: path),
-               var session = try? JSONDecoder().decode(SessionInfo.self, from: data) {
-                session.status = "dead"
-                writeSessionFile(session, to: path)
+               let session = try? JSONDecoder().decode(SessionInfo.self, from: data) {
+                preBootDeadIds.insert(session.session_id)
             }
-            NSLog("[ClaudeMonitor] Marked legacy discovered session %@ as dead", file)
+            NSLog("[ClaudeMonitor] Legacy discovered session %@ — will hide from UI", file)
         }
     }
 
@@ -461,15 +475,6 @@ class SessionReader: ObservableObject {
         return (cwd, prompt, timestamp, isSubagent)
     }
 
-    /// Write a SessionInfo to a JSON file atomically.
-    private func writeSessionFile(_ session: SessionInfo, to path: String) {
-        guard let data = try? JSONEncoder().encode(session) else { return }
-        let tmpPath = path + ".tmp"
-        try? data.write(to: URL(fileURLWithPath: tmpPath))
-        // POSIX rename() is atomic — no window where the file doesn't exist
-        rename(tmpPath, path)
-    }
-
     /// Find the JSONL file path for a session ID by scanning project directories.
     private func findJSONLPath(sessionId: String) -> String? {
         let fm = FileManager.default
@@ -483,16 +488,15 @@ class SessionReader: ObservableObject {
         return nil
     }
 
-    /// Scan `~/.claude/projects/` JSONL files to discover and update sessions.
-    /// This is the primary session detection mechanism — replaces TTY-based discovery.
+    /// Scan `~/.claude/projects/` JSONL files to populate in-memory derivedData.
+    /// No session files are written — readSessions() merges this data at display time.
     func scanProjects() {
         let fm = FileManager.default
         guard let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) else { return }
         let now = Date()
         let twoMinAgo = now.addingTimeInterval(-120)
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime]
-        let nowString = isoFormatter.string(from: now)
+
+        var newDerived: [String: DerivedSessionData] = [:]
 
         for projectDir in projectDirs {
             let projectPath = "\(projectsDir)/\(projectDir)"
@@ -512,7 +516,7 @@ class SessionReader: ObservableObject {
                 let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
                 // Read last ~4KB to extract info
-                let (cwd, lastPrompt, lastTimestamp, isSubagent) = readJSONLTail(path: jsonlPath)
+                let (cwd, lastPrompt, _, isSubagent) = readJSONLTail(path: jsonlPath)
 
                 // Skip subagent sessions (team members, Task tool agents)
                 if isSubagent { continue }
@@ -537,51 +541,21 @@ class SessionReader: ObservableObject {
                     }
                 }
 
-                // Update existing session files (don't touch status — hooks own lifecycle).
-                // Only create new files for very fresh JSONLs (monitor restart recovery).
-                let sessionFile = "\(sessionsDir)/\(sessionId).json"
-                if let data = fm.contents(atPath: sessionFile),
-                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                {
-                    // Don't touch shutting_down sessions — they're waiting to be hidden
-                    if json["status"] as? String == "shutting_down" { continue }
-
-                    // Update only scanner-owned fields; preserve status and everything else from disk
-                    var updated = json
-                    if (updated["project"] as? String) == "unknown" || (updated["cwd"] as? String ?? "").isEmpty {
-                        updated["project"] = project
-                        updated["cwd"] = cwd
-                    }
-                    if !lastPrompt.isEmpty {
-                        updated["last_prompt"] = lastPrompt
-                    }
-                    updated["agent_count"] = agentCount
-                    updated["updated_at"] = nowString
-                    if let outData = try? JSONSerialization.data(withJSONObject: updated) {
-                        let tmpPath = sessionFile + ".tmp"
-                        try? outData.write(to: URL(fileURLWithPath: tmpPath))
-                        rename(tmpPath, sessionFile)
-                    }
-                } else if mtime > now.addingTimeInterval(-30) {
-                    // Only create for JSONLs modified in last 30s (recovery after monitor restart).
-                    // Older JSONLs without session files were intentionally cleaned up.
-                    // Use "idle" — a recovered session is not truly starting, it was already running.
-                    let session = SessionInfo(
-                        session_id: sessionId, status: "idle",
-                        project: project, cwd: cwd,
-                        terminal: "", terminal_session_id: "",
-                        started_at: lastTimestamp ?? nowString,
-                        updated_at: nowString,
-                        last_prompt: lastPrompt,
-                        agent_count: agentCount
-                    )
-                    writeSessionFile(session, to: sessionFile)
-                }
+                newDerived[sessionId] = DerivedSessionData(
+                    project: project,
+                    cwd: cwd,
+                    lastPrompt: lastPrompt,
+                    agentCount: agentCount,
+                    jsonlMtime: mtime,
+                    jsonlPath: jsonlPath
+                )
             }
         }
+
+        derivedData = newDerived
     }
 
-    /// Remove session files whose `claude` process is no longer running
+    /// Detect dead sessions and collect their IDs in memory (no file writes).
     func pruneDeadSessions() {
         // Read raw files from disk instead of using aggregated `sessions` property,
         // so every session file gets liveness-checked (not just deduplicated ones)
@@ -608,8 +582,10 @@ class SessionReader: ObservableObject {
             var noInfoSessions: [SessionInfo] = []
 
             for session in currentSessions {
-                // Skip already-dead sessions
+                // Skip already-dead sessions (on disk or in memory)
                 if session.status == "dead" { continue }
+                if self.inferredDeadIds.contains(session.session_id) { continue }
+                if self.preBootDeadIds.contains(session.session_id) { continue }
                 // Skip "starting" sessions — they're brand new, may not have JSONL yet
                 if session.status == "starting" && !session.isStale { continue }
 
@@ -623,8 +599,6 @@ class SessionReader: ObservableObject {
                     if age > 43200 {
                         deadSessionIds.append(session.session_id)
                     }
-                    // Otherwise keep the file — shutting_down sessions are hidden from UI
-                    // but kept on disk so session resumption can "reboot" them.
                     continue
                 }
 
@@ -725,34 +699,32 @@ class SessionReader: ObservableObject {
                 deadSessionIds.append(session.session_id)
             }
 
-            // Mark dead sessions (skip team leads with active agents)
-            let deadSet = Set(deadSessionIds)
+            // Collect dead IDs into memory (skip team leads with active agents)
+            var newDeadIds: Set<String> = []
             for sid in deadSessionIds {
                 if self.sessionHasActiveTeam(sid) {
                     NSLog("[ClaudeMonitor] Skipping prune of team lead %@ (has active agents)", sid)
                     continue
                 }
-                let path = "\(self.sessionsDir)/\(sid).json"
-                if let data = FileManager.default.contents(atPath: path),
-                   var session = try? JSONDecoder().decode(SessionInfo.self, from: data) {
-                    session.status = "dead"
-                    self.writeSessionFile(session, to: path)
-                }
-                NSLog("[ClaudeMonitor] Marked dead session %@", sid)
+                newDeadIds.insert(sid)
+                NSLog("[ClaudeMonitor] Inferred dead session %@", sid)
             }
 
-            // Also mark child sessions as dead when their parent is dead
+            // Also cascade: mark child sessions as dead when their parent is dead
+            let deadSet = newDeadIds.union(self.inferredDeadIds)
             for session in currentSessions {
                 guard let parentSid = session.parent_session_id,
                       session.status != "dead",
                       deadSet.contains(parentSid) else { continue }
-                let path = "\(self.sessionsDir)/\(session.session_id).json"
-                if let data = FileManager.default.contents(atPath: path),
-                   var child = try? JSONDecoder().decode(SessionInfo.self, from: data) {
-                    child.status = "dead"
-                    self.writeSessionFile(child, to: path)
-                    NSLog("[ClaudeMonitor] Marked child session %@ as dead (parent %@ is dead)", child.session_id, parentSid)
-                }
+                newDeadIds.insert(session.session_id)
+                NSLog("[ClaudeMonitor] Inferred child session %@ dead (parent %@ is dead)",
+                      session.session_id, parentSid)
+            }
+
+            // Update in-memory set and refresh UI on main thread
+            DispatchQueue.main.async {
+                self.inferredDeadIds = newDeadIds
+                self.readSessions()
             }
         }
     }
@@ -807,14 +779,28 @@ class SessionReader: ObservableObject {
         }
 
         let isoFmt = ISO8601DateFormatter()
+        let now = Date()
         var loaded: [SessionInfo] = []
+        var loadedIds: Set<String> = []
+
         for file in files where file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
             guard let data = fm.contents(atPath: path) else { continue }
             do {
-                let session = try JSONDecoder().decode(SessionInfo.self, from: data)
-                // Never show dead sessions
+                var session = try JSONDecoder().decode(SessionInfo.self, from: data)
+                // Never show dead sessions (hook-written OR in-memory)
                 if session.status == "dead" { continue }
+                if preBootDeadIds.contains(session.session_id) { continue }
+                // If a session in inferredDeadIds was updated by a hook recently, resurrect it
+                if inferredDeadIds.contains(session.session_id) {
+                    if let attrs = try? fm.attributesOfItem(atPath: path),
+                       let mtime = attrs[.modificationDate] as? Date,
+                       now.timeIntervalSince(mtime) < 30 {
+                        inferredDeadIds.remove(session.session_id)
+                    } else {
+                        continue
+                    }
+                }
                 // Hide shutting_down sessions after 30s (file stays for potential resume)
                 if session.status == "shutting_down" {
                     isoFmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -823,14 +809,55 @@ class SessionReader: ObservableObject {
                         isoFmt.formatOptions = [.withInternetDateTime]
                         updDate = isoFmt.date(from: session.updated_at)
                     }
-                    if let d = updDate, Date().timeIntervalSince(d) > 30 { continue }
+                    if let d = updDate, now.timeIntervalSince(d) > 30 { continue }
+                }
+                // Read context_pct from sidecar file
+                let contextPath = "\(sessionsDir)/\(session.session_id).context"
+                if let contextData = fm.contents(atPath: contextPath),
+                   let contextStr = String(data: contextData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   let pct = Int(contextStr) {
+                    session.context_pct = pct
+                }
+                // Enrich with JSONL-derived data (project, cwd, last_prompt, agent_count)
+                if let derived = derivedData[session.session_id] {
+                    if session.project == "unknown" || session.cwd.isEmpty {
+                        session.project = derived.project
+                        session.cwd = derived.cwd
+                    }
+                    if !derived.lastPrompt.isEmpty {
+                        session.last_prompt = derived.lastPrompt
+                    }
+                    session.agent_count = derived.agentCount
                 }
                 loaded.append(session)
+                loadedIds.insert(session.session_id)
             } catch {
                 NSLog(
                     "[ClaudeMonitor] Skipping corrupt session file %@: %@", file,
                     error.localizedDescription)
             }
+        }
+
+        // Recovery: for derivedData entries with fresh JSONL but no session file,
+        // create in-memory SessionInfo (monitor restart recovery)
+        isoFmt.formatOptions = [.withInternetDateTime]
+        let nowString = isoFmt.string(from: now)
+        for (sessionId, derived) in derivedData {
+            guard !loadedIds.contains(sessionId),
+                  !preBootDeadIds.contains(sessionId),
+                  !inferredDeadIds.contains(sessionId),
+                  let mtime = derived.jsonlMtime,
+                  now.timeIntervalSince(mtime) < 30
+            else { continue }
+            let session = SessionInfo(
+                session_id: sessionId, status: "idle",
+                project: derived.project, cwd: derived.cwd,
+                terminal: "", terminal_session_id: "",
+                started_at: nowString, updated_at: nowString,
+                last_prompt: derived.lastPrompt,
+                agent_count: derived.agentCount
+            )
+            loaded.append(session)
         }
 
         // Stabilize transient statuses to prevent flicker during plan mode exit.
@@ -840,8 +867,6 @@ class SessionReader: ObservableObject {
         // Suppress transient states and re-inject disappeared sessions for a 3s grace period.
         let stableStatuses: Set<String> = ["working", "idle", "attention"]
         let transientStatuses: Set<String> = ["shutting_down", "starting"]
-        let now = Date()
-        let loadedIds = Set(loaded.map(\.session_id))
 
         // Re-inject sessions that disappeared but were recently stable
         for (sid, status) in lastStableStatus {
@@ -1550,7 +1575,7 @@ struct SessionRowView: View {
 
                     if let pct = session.context_pct {
                         Text("\(pct)%")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .font(.system(size: 10.8, weight: .medium, design: .monospaced))
                             .foregroundColor(session.contextPctColor)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 2)

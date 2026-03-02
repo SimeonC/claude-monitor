@@ -178,8 +178,21 @@ TERM_INFO=$(detect_terminal)
 TERM_APP=$(echo "$TERM_INFO" | cut -d'|' -f1)
 TERM_SID=$(echo "$TERM_INFO" | cut -d'|' -f2)
 
+# Helper: create session file if missing (hooks bootstrap it on first event after monitor restart)
+ensure_session_file() {
+    [ -f "$SESSION_FILE" ] && return 0
+    jq -n \
+        --arg sid "$SESSION_ID" --arg status "idle" \
+        --arg project "$PROJECT" --arg cwd "${CWD:-}" \
+        --arg terminal "$TERM_APP" --arg term_sid "$TERM_SID" \
+        --arg now "$NOW" \
+        '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0}' \
+        > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+}
+
 # Helper: backfill terminal info on existing session file (preserves all other fields)
 backfill_terminal() {
+    ensure_session_file
     [ -f "$SESSION_FILE" ] || return 0
     [ -z "$TERM_APP" ] && return 0
     jq \
@@ -208,6 +221,7 @@ cleanup_same_terminal() {
 # Helper: any non-dead status → working when user/tool activity happens.
 # PreToolUse fires after the user approves a permission prompt, so this clears attention.
 set_working() {
+    ensure_session_file
     [ -f "$SESSION_FILE" ] || return 0
     jq \
         --arg updated "$NOW" \
@@ -246,6 +260,7 @@ case "$EVENT" in
         ;;
 
     Stop)
+        ensure_session_file
         if [ -f "$SESSION_FILE" ]; then
             jq \
                 --arg status "idle" \
@@ -257,6 +272,7 @@ case "$EVENT" in
 
     Notification)
         NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
+        ensure_session_file
         if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
             # idle_prompt means Claude is at the input prompt — set idle
             if [ -f "$SESSION_FILE" ]; then
@@ -317,6 +333,7 @@ case "$EVENT" in
     UserPromptSubmit|PostToolUse|PostToolUseFailure)
         # User submitted prompt or tool completed — clear attention and set working.
         # PostToolUse/PostToolUseFailure means user answered any permission prompt; UserPromptSubmit means user is active.
+        ensure_session_file
         backfill_terminal
         if [ -f "$SESSION_FILE" ]; then
             jq \
