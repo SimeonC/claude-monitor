@@ -28,6 +28,12 @@ if [ -n "$session_id" ] && [ -n "$used" ]; then
     fi
 
     printf "%s" "$new_pct" > "${CONTEXT_FILE}.tmp" && mv "${CONTEXT_FILE}.tmp" "$CONTEXT_FILE"
+
+    # Write model name to sidecar file
+    if [ -n "$model" ]; then
+        MODEL_FILE="$HOME/.claude/monitor/sessions/${session_id}.model"
+        printf "%s" "$model" > "${MODEL_FILE}.tmp" && mv "${MODEL_FILE}.tmp" "$MODEL_FILE"
+    fi
 fi
 
 # Output statusbar text (same as original statusline-command.sh)

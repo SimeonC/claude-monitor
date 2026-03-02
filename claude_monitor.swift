@@ -175,19 +175,21 @@ struct SessionInfo: Codable, Identifiable {
     var agent_count: Int
     var parent_session_id: String?
     var context_pct: Int?
+    var model: String?
 
     var id: String { session_id }
 
     enum CodingKeys: String, CodingKey {
         case session_id, status, project, cwd, terminal, terminal_session_id, started_at,
-            updated_at, last_prompt, agent_count, parent_session_id, context_pct
+            updated_at, last_prompt, agent_count, parent_session_id, context_pct, model
     }
 
     init(
         session_id: String, status: String, project: String, cwd: String,
         terminal: String, terminal_session_id: String,
         started_at: String, updated_at: String, last_prompt: String,
-        agent_count: Int = 0, parent_session_id: String? = nil, context_pct: Int? = nil
+        agent_count: Int = 0, parent_session_id: String? = nil, context_pct: Int? = nil,
+        model: String? = nil
     ) {
         self.session_id = session_id
         self.status = status
@@ -201,6 +203,7 @@ struct SessionInfo: Codable, Identifiable {
         self.agent_count = agent_count
         self.parent_session_id = parent_session_id
         self.context_pct = context_pct
+        self.model = model
     }
 
     init(from decoder: Decoder) throws {
@@ -217,6 +220,7 @@ struct SessionInfo: Codable, Identifiable {
         agent_count = (try? c.decode(Int.self, forKey: .agent_count)) ?? 0
         parent_session_id = try? c.decode(String.self, forKey: .parent_session_id)
         context_pct = try? c.decode(Int.self, forKey: .context_pct)
+        model = try? c.decode(String.self, forKey: .model)
     }
 
     var statusColor: Color {
@@ -228,6 +232,18 @@ struct SessionInfo: Codable, Identifiable {
         case "shutting_down": return .gray
         default: return .gray
         }
+    }
+
+    var shortModelName: String? {
+        guard let m = model, !m.isEmpty else { return nil }
+        // "Claude 3.5 Sonnet" -> "Sonnet 3.5", "Claude Haiku 4.5" -> "Haiku 4.5"
+        let stripped = m.hasPrefix("Claude ") ? String(m.dropFirst(7)) : m
+        // Rearrange "3.5 Sonnet" -> "Sonnet 3.5" if version comes first
+        let parts = stripped.split(separator: " ", maxSplits: 1)
+        if parts.count == 2, parts[0].first?.isNumber == true {
+            return "\(parts[1]) \(parts[0])"
+        }
+        return stripped
     }
 
     var contextPctColor: Color {
@@ -826,6 +842,13 @@ class SessionReader: ObservableObject {
                    let pct = Int(contextStr) {
                     session.context_pct = pct
                 }
+                // Read model from sidecar file
+                let modelPath = "\(sessionsDir)/\(session.session_id).model"
+                if let modelData = fm.contents(atPath: modelPath),
+                   let modelStr = String(data: modelData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !modelStr.isEmpty {
+                    session.model = modelStr
+                }
                 // Enrich with JSONL-derived data (project, cwd, last_prompt, agent_count)
                 if let derived = derivedData[session.session_id] {
                     if session.project == "unknown" || session.cwd.isEmpty {
@@ -1093,6 +1116,7 @@ class SessionReader: ObservableObject {
                 "terminal_session_id": s.terminal_session_id,
             ]
             if let pct = s.context_pct { d["context_pct"] = pct }
+            if let m = s.model { d["model"] = m }
             if s.agent_count > 0 { d["agent_count"] = s.agent_count }
             if let parent = s.parent_session_id { d["parent_session_id"] = parent }
             return d
@@ -1646,6 +1670,7 @@ struct SessionRowView: View {
                             .background(Capsule().fill(session.contextPctColor.opacity(0.15)))
                             .fixedSize()
                     }
+
                 }
 
                 HStack(spacing: 6) {
@@ -1663,6 +1688,13 @@ struct SessionRowView: View {
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.white.opacity(0.5))
                         .fixedSize()
+
+                    if let modelName = session.shortModelName {
+                        Text(modelName)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.white.opacity(0.45))
+                            .fixedSize()
+                    }
                 }
             }
         }
