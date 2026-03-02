@@ -13,7 +13,21 @@ model=$(echo "$input" | jq -r '.model.display_name // empty')
 # Write context_pct to sidecar file (avoids TOCTOU race with monitor.sh on session JSON)
 if [ -n "$session_id" ] && [ -n "$used" ]; then
     CONTEXT_FILE="$HOME/.claude/monitor/sessions/${session_id}.context"
-    printf "%.0f" "$used" > "${CONTEXT_FILE}.tmp" && mv "${CONTEXT_FILE}.tmp" "$CONTEXT_FILE"
+    SESSION_FILE="$HOME/.claude/monitor/sessions/${session_id}.json"
+    new_pct=$(printf "%.0f" "$used")
+
+    # Detect context reset (/clear): context drops from >10% to <5%
+    if [ -f "$CONTEXT_FILE" ] && [ -f "$SESSION_FILE" ]; then
+        old_pct=$(cat "$CONTEXT_FILE" 2>/dev/null || echo "0")
+        if [ "$old_pct" -gt 10 ] 2>/dev/null && [ "$new_pct" -lt 5 ] 2>/dev/null; then
+            NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            jq --arg now "$NOW" \
+                '.started_at = $now | .updated_at = $now | if .status != "dead" then .status = "idle" else . end' \
+                "$SESSION_FILE" > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+        fi
+    fi
+
+    printf "%s" "$new_pct" > "${CONTEXT_FILE}.tmp" && mv "${CONTEXT_FILE}.tmp" "$CONTEXT_FILE"
 fi
 
 # Output statusbar text (same as original statusline-command.sh)

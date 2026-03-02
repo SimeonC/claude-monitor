@@ -305,6 +305,7 @@ struct DerivedSessionData {
 class SessionReader: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     private var livenessTimer: Timer?
+    private var refreshTimer: Timer?
     private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
     /// Last known stable status per session (working/idle/attention) for suppressing transient flicker
@@ -359,6 +360,13 @@ class SessionReader: ObservableObject {
         livenessTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) {
             [weak self] _ in
             self?.pruneDeadSessions()
+        }
+
+        // Periodic refresh: pick up changes even if FSEvents misses them
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) {
+            [weak self] _ in
+            self?.scanProjects()
+            self?.readSessions()
         }
     }
 
