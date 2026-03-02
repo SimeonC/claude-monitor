@@ -868,6 +868,9 @@ class SessionReader: ObservableObject {
             loaded.append(session)
         }
 
+        // Debug: capture pre-stabilization state
+        let debugPreStabilize = loaded.map { "\($0.session_id.prefix(8)):\($0.status)" }
+
         // Stabilize transient statuses to prevent flicker during plan mode exit.
         // Plan mode exit fires SessionEnd → SessionStart → tool hooks in rapid succession,
         // causing brief "shutting_down" → "starting" → "working" transitions, or the
@@ -1045,8 +1048,61 @@ class SessionReader: ObservableObject {
             $0.project.localizedCaseInsensitiveCompare($1.project) == .orderedAscending
         }
 
+        // Debug: capture post-stabilization / pre-aggregation state
+        let debugPostStabilize = loaded.map { "\($0.session_id.prefix(8)):\($0.status)" }
+
+        // Debug: dump pipeline state to JSON for diagnosing status bugs
+        dumpDebugState(
+            preStabilize: debugPreStabilize,
+            postStabilize: debugPostStabilize,
+            aggregated: aggregated
+        )
+
         DispatchQueue.main.async {
             self.sessions = aggregated
+        }
+    }
+
+    /// Write current pipeline state to ~/.claude/monitor/debug.json for diagnosis.
+    private func dumpDebugState(preStabilize: [String], postStabilize: [String], aggregated: [SessionInfo]) {
+        let debugPath = "\(sessionsDir)/../debug.json"
+        let isoFmt = ISO8601DateFormatter()
+        isoFmt.formatOptions = [.withInternetDateTime]
+        let nowStr = isoFmt.string(from: Date())
+
+        var debugDict: [String: Any] = ["timestamp": nowStr]
+
+        // inferredDeadIds and preBootDeadIds
+        debugDict["inferredDeadIds"] = Array(inferredDeadIds).sorted()
+        debugDict["preBootDeadIds"] = Array(preBootDeadIds).sorted()
+        debugDict["hiddenSessionIds"] = Array(hiddenSessionIds).sorted()
+
+        // lastStableStatus
+        debugDict["lastStableStatus"] = lastStableStatus
+        debugDict["preStabilize"] = preStabilize
+        debugDict["postStabilize"] = postStabilize
+
+        // Final aggregated sessions (what the UI shows)
+        debugDict["sessions"] = aggregated.map { s -> [String: Any] in
+            var d: [String: Any] = [
+                "session_id": s.session_id,
+                "status": s.status,
+                "project": s.project,
+                "cwd": s.cwd,
+                "updated_at": s.updated_at,
+                "terminal_session_id": s.terminal_session_id,
+            ]
+            if let pct = s.context_pct { d["context_pct"] = pct }
+            if s.agent_count > 0 { d["agent_count"] = s.agent_count }
+            if let parent = s.parent_session_id { d["parent_session_id"] = parent }
+            return d
+        }
+
+        if let data = try? JSONSerialization.data(
+            withJSONObject: debugDict, options: [.prettyPrinted, .sortedKeys]),
+           let str = String(data: data, encoding: .utf8)
+        {
+            try? str.write(toFile: debugPath, atomically: true, encoding: .utf8)
         }
     }
 
