@@ -912,7 +912,7 @@ class SessionReader: ObservableObject {
 
         // Aggregate sessions with the same project name
         let statusPriority: [String: Int] = [
-            "working": 0, "attention": 1, "idle": 2, "shutting_down": 3, "starting": 4,
+            "attention": 0, "working": 1, "idle": 2, "shutting_down": 3, "starting": 4,
         ]
         var grouped: [String: [SessionInfo]] = [:]
         for s in loaded { grouped[s.project, default: []].append(s) }
