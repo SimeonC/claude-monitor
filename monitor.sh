@@ -328,14 +328,19 @@ case "$EVENT" in
         ;;
 
     SubagentStop)
-        # Sub-agent finished — delete its session file, update parent to working
+        # Sub-agent finished — delete its session file, update parent to working.
+        # Don't override "idle": Stop may have already fired before this SubagentStop.
         AGENT_TRANSCRIPT=$(echo "$INPUT" | jq -r '.agent_transcript_path // empty')
         if [ -n "$AGENT_TRANSCRIPT" ]; then
             local_filename=$(basename "$AGENT_TRANSCRIPT" .jsonl)
             rm -f "$SESSIONS_DIR/sub-${local_filename}.json"
         fi
         backfill_terminal
-        set_working
+        ensure_session_file
+        [ -f "$SESSION_FILE" ] || exit 0
+        update_json_file "$SESSION_FILE" \
+            --arg updated "$NOW" \
+            'if .status == "dead" or .status == "idle" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
         ;;
 
     UserPromptSubmit|PostToolUse|PostToolUseFailure)

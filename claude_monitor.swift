@@ -705,6 +705,19 @@ class SessionReader: ObservableObject {
                     deadSessionIds.insert(session.session_id)
                 }
 
+                // --- Safety net: sessions stuck in "working" for 10+ min ---
+                // Catches the SubagentStop race: SubagentStop fires after Stop and re-sets
+                // the parent to "working", leaving it stuck indefinitely.
+                for (session, _) in currentSessions
+                where session.status == "working"
+                    && !deadSessionIds.contains(session.session_id)
+                    && session.isStale
+                {
+                    NSLog("[ClaudeMonitor] Pruning stuck-working session %@ (%@): no update for 10+ min",
+                          session.session_id, session.project)
+                    deadSessionIds.insert(session.session_id)
+                }
+
                 // Skip team leads with active agents
                 for sid in Array(deadSessionIds) {
                     if self.sessionHasActiveTeam(sid) {
