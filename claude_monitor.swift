@@ -325,9 +325,9 @@ class SessionReader: ObservableObject {
     private var refreshTimer: Timer?
     private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
-    /// Sessions hidden by user via X button; auto-unhidden when session's updated_at changes
-    private var hiddenSessionIds: Set<String> = []
-    /// The updated_at value at the time the session was hidden (to detect activity)
+    /// Projects hidden by user via X button; auto-unhidden when any session's updated_at changes
+    private var hiddenProjects: Set<String> = []
+    /// The updated_at value at the time the project was hidden (to detect activity)
     private var hiddenAtUpdatedAt: [String: String] = [:]
     /// JSONL-derived data held in memory (never written to session files)
     private var derivedData: [String: DerivedSessionData] = [:]
@@ -788,10 +788,10 @@ class SessionReader: ObservableObject {
     }
 
     /// Hide a session from the UI. It will reappear if its updated_at changes (new activity).
-    func hideSession(_ id: String, updatedAt: String) {
+    func hideSession(_ id: String, project: String, updatedAt: String) {
         ioQueue.async { [weak self] in
-            self?.hiddenSessionIds.insert(id)
-            self?.hiddenAtUpdatedAt[id] = updatedAt
+            self?.hiddenProjects.insert(project)
+            self?.hiddenAtUpdatedAt[project] = updatedAt
         }
         // Immediately remove from published list on main thread
         sessions.removeAll { $0.session_id == id }
@@ -1010,16 +1010,16 @@ class SessionReader: ObservableObject {
             aggregated.append(merged)
         }
 
-        // Unhide sessions whose updated_at changed (new activity since hide)
+        // Unhide projects whose updated_at changed (new activity since hide)
         for s in aggregated {
-            if let hiddenUpdatedAt = hiddenAtUpdatedAt[s.session_id],
+            if let hiddenUpdatedAt = hiddenAtUpdatedAt[s.project],
                s.updated_at != hiddenUpdatedAt {
-                hiddenSessionIds.remove(s.session_id)
-                hiddenAtUpdatedAt.removeValue(forKey: s.session_id)
+                hiddenProjects.remove(s.project)
+                hiddenAtUpdatedAt.removeValue(forKey: s.project)
             }
         }
-        // Filter out hidden sessions
-        aggregated.removeAll { hiddenSessionIds.contains($0.session_id) }
+        // Filter out hidden projects
+        aggregated.removeAll { hiddenProjects.contains($0.project) }
 
         // Sort alphabetically by project name for stable ordering
         aggregated.sort {
@@ -1042,7 +1042,7 @@ class SessionReader: ObservableObject {
         let nowStr = isoFmt.string(from: Date())
 
         var debugDict: [String: Any] = ["timestamp": nowStr]
-        debugDict["hiddenSessionIds"] = Array(hiddenSessionIds).sorted()
+        debugDict["hiddenProjects"] = Array(hiddenProjects).sorted()
 
         // Final aggregated sessions (what the UI shows)
         debugDict["sessions"] = aggregated.map { s -> [String: Any] in
@@ -1904,7 +1904,7 @@ struct MonitorContentView: View {
                                 session: session,
                                 teamInfo: teamReader.teamsBySession[session.session_id],
                                 isActive: session.session_id == activeTracker.activeSessionId,
-                                onHide: { reader.hideSession(session.session_id, updatedAt: session.updated_at) }
+                                onHide: { reader.hideSession(session.session_id, project: session.project, updatedAt: session.updated_at) }
                             )
                             .overlay(
                                 FirstMouseClickArea {
