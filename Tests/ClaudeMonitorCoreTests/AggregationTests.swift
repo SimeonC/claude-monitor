@@ -1,0 +1,203 @@
+import XCTest
+@testable import ClaudeMonitorCore
+
+final class AggregationTests: XCTestCase {
+
+    // Fixed reference date for deterministic tests
+    private let referenceDate = Date(timeIntervalSinceReferenceDate: 1_000_000)
+
+    private let fmt: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private func makeSession(
+        id: String,
+        status: String,
+        project: String,
+        cwd: String,
+        terminal: String = "",
+        terminalSessionId: String = "",
+        updatedAt: Date? = nil,
+        startedAt: Date? = nil,
+        lastPrompt: String = ""
+    ) -> SessionInfo {
+        let updated = updatedAt ?? referenceDate
+        let started = startedAt ?? referenceDate.addingTimeInterval(-60)
+        return SessionInfo(
+            session_id: id,
+            status: status,
+            project: project,
+            cwd: cwd,
+            terminal: terminal,
+            terminal_session_id: terminalSessionId,
+            started_at: fmt.string(from: started),
+            updated_at: fmt.string(from: updated),
+            last_prompt: lastPrompt
+        )
+    }
+
+    // MARK: - Single session
+
+    func testSingleSessionPassesThrough() {
+        let session = makeSession(id: "s1", status: "idle", project: "proj", cwd: "/proj")
+        let result = aggregateSessions([session], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].session_id, "s1")
+    }
+
+    func testEmptyInputReturnsEmpty() {
+        let result = aggregateSessions([], referenceDate: referenceDate)
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    // MARK: - Status priority: working (fresh) beats idle
+
+    func testFreshWorkingBeatsIdle() {
+        // Updated 10s ago — not stale (< 5 min threshold), priority = 1
+        let working = makeSession(
+            id: "w", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        let idle = makeSession(id: "i", status: "idle", project: "proj", cwd: "/proj")
+        let result = aggregateSessions([working, idle], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].status, "working")
+    }
+
+    // MARK: - Regression: stale working loses to idle
+
+    func testStaleWorkingLosesToIdle() {
+        // Updated 6 min ago — stale (> 5 min threshold), demoted to priority 3
+        // Idle has priority 2, so idle wins
+        let staleWorking = makeSession(
+            id: "w", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-360)
+        )
+        let idle = makeSession(id: "i", status: "idle", project: "proj", cwd: "/proj")
+        let result = aggregateSessions([staleWorking, idle], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].status, "idle",
+            "Stale working session should lose to idle (regression test for stuck-working bug)")
+    }
+
+    func testWorkingExactlyAt5MinIsNotDemoted() {
+        // Updated exactly 5 min ago: fiveMinAgo = ref - 300, updated = ref - 300
+        // Condition: updated < fiveMinAgo → false (equal is NOT less than)
+        // So still treated as fresh working → beats idle
+        let working = makeSession(
+            id: "w", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-300)
+        )
+        let idle = makeSession(id: "i", status: "idle", project: "proj", cwd: "/proj")
+        let result = aggregateSessions([working, idle], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].status, "working")
+    }
+
+    // MARK: - Attention beats working (fresh)
+
+    func testAttentionBeatsEverything() {
+        let working = makeSession(
+            id: "w", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        let idle = makeSession(id: "i", status: "idle", project: "proj", cwd: "/proj")
+        let attention = makeSession(id: "a", status: "attention", project: "proj", cwd: "/proj")
+        let result = aggregateSessions([working, idle, attention], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].status, "attention")
+    }
+
+    // MARK: - CWD merging
+
+    func testSessionsWithSameCWDAreMerged() {
+        let a = makeSession(id: "a", status: "idle", project: "proj-a", cwd: "/shared/dir")
+        let b = makeSession(id: "b", status: "idle", project: "proj-b", cwd: "/shared/dir")
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1,
+            "Sessions with same CWD but different project names should be merged")
+    }
+
+    func testSessionsWithDifferentCWDsAreNotMerged() {
+        let a = makeSession(id: "a", status: "idle", project: "proj", cwd: "/dir-a")
+        let b = makeSession(id: "b", status: "idle", project: "proj", cwd: "/dir-b")
+        // Same project name → grouped together regardless (by project key, not CWD)
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+    }
+
+    // MARK: - Terminal info merging
+
+    func testTerminalInfoTakenFromFirstSessionThatHasIt() {
+        // Working session has no terminal info; idle has it
+        // Working beats idle on status, but should inherit terminal from idle
+        let noTerminal = makeSession(
+            id: "w", status: "working", project: "proj", cwd: "/proj",
+            terminal: "", terminalSessionId: "",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        let withTerminal = makeSession(
+            id: "i", status: "idle", project: "proj", cwd: "/proj",
+            terminal: "ghostty", terminalSessionId: "/dev/ttys001"
+        )
+        let result = aggregateSessions([noTerminal, withTerminal], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].status, "working")
+        XCTAssertEqual(result[0].terminal, "ghostty",
+            "Terminal info should be inherited from first session that has it")
+        XCTAssertEqual(result[0].terminal_session_id, "/dev/ttys001")
+    }
+
+    func testTerminalInfoPreservedIfRepresentativeHasIt() {
+        let withTerminal = makeSession(
+            id: "w", status: "working", project: "proj", cwd: "/proj",
+            terminal: "iterm2", terminalSessionId: "w0t0p0:GUID123",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        let noTerminal = makeSession(
+            id: "i", status: "idle", project: "proj", cwd: "/proj",
+            terminal: "", terminalSessionId: ""
+        )
+        let result = aggregateSessions([withTerminal, noTerminal], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].terminal, "iterm2")
+    }
+
+    // MARK: - started_at merging
+
+    func testStartedAtTakesEarliestOfGroup() {
+        let earlyDate = referenceDate.addingTimeInterval(-3600)  // 1 hour ago
+        let lateDate = referenceDate.addingTimeInterval(-60)     // 1 minute ago
+        let early = makeSession(
+            id: "a", status: "idle", project: "proj", cwd: "/proj",
+            startedAt: earlyDate
+        )
+        let late = makeSession(
+            id: "b", status: "idle", project: "proj", cwd: "/proj",
+            startedAt: lateDate
+        )
+        let result = aggregateSessions([early, late], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].started_at, fmt.string(from: earlyDate),
+            "Merged session should use the earliest started_at for maximum elapsed time")
+    }
+
+    // MARK: - last_prompt merging
+
+    func testLastPromptTakenFromFirstSessionThatHasIt() {
+        let noPrompt = makeSession(
+            id: "w", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10),
+            lastPrompt: ""
+        )
+        let withPrompt = makeSession(
+            id: "i", status: "idle", project: "proj", cwd: "/proj",
+            lastPrompt: "hello world"
+        )
+        let result = aggregateSessions([noPrompt, withPrompt], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].last_prompt, "hello world")
+    }
+}

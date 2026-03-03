@@ -57,21 +57,11 @@ jq --arg cmd "$STATUSLINE_CMD" '.statusLine = {"type": "command", "command": $cm
 echo "Configured statusLine hook in settings.json."
 
 # --- 4. Build: compile in repo, deploy binary + monitor.sh ---
-SWIFT_FILE="$REPO_DIR/claude_monitor.swift"
-BUILD_BINARY="$REPO_DIR/claude_monitor"
-
 echo "Compiling Claude Monitor..."
-swiftc "$SWIFT_FILE" \
-    -o "$BUILD_BINARY" \
-    -framework Cocoa \
-    -framework SwiftUI \
-    -framework Combine \
-    -parse-as-library \
-    -suppress-warnings \
-    2>&1
+(cd "$REPO_DIR" && swift build -c release --product ClaudeMonitor 2>&1)
 
 echo "Build successful."
-cp "$BUILD_BINARY" "$BINARY"
+cp "$REPO_DIR/.build/release/ClaudeMonitor" "$BINARY"
 cp "$REPO_DIR/monitor.sh" "$HOOKS_DIR/monitor.sh"
 chmod +x "$HOOKS_DIR/monitor.sh"
 

@@ -1,3 +1,7 @@
+function danger_claude --wraps=claude --description 'Claude Code with --allow-dangerously-skip-permissions'
+    claude --allow-dangerously-skip-permissions $argv
+end
+
 function claude --wraps=claude --description 'Claude Code with tmux session management'
     # Read + increment counter (resets on reboot via $TMPDIR)
     set -l counter_file "$TMPDIR/claude_monitor_counter"
