@@ -12,3 +12,4 @@ config.json.personal
 
 # User-specific config note:
 # config.json is committed as a template with safe defaults
+/.build

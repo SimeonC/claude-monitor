@@ -1,13 +1,15 @@
-function danger_claude --wraps=claude --description 'Claude Code with --allow-dangerously-skip-permissions'
-    claude --allow-dangerously-skip-permissions $argv
-end
-
 function claude --wraps=claude --description 'Claude Code with tmux session management'
-    # Read + increment counter (resets on reboot via $TMPDIR)
-    set -l counter_file "$TMPDIR/claude_monitor_counter"
+    # Read + increment counter (persists in ~/.claude so it works across host + devcontainers)
+    set -l counter_file "$HOME/.claude/monitor_counter"
     set -l next 1
     if test -f "$counter_file"
         set next (math (cat "$counter_file") + 1)
+    else
+        # Migrate from old TMPDIR-based counter
+        set -l old_counter "$TMPDIR/claude_monitor_counter"
+        if test -f "$old_counter"
+            set next (math (cat "$old_counter") + 1)
+        end
     end
     echo $next >"$counter_file"
 
@@ -24,6 +26,12 @@ function claude --wraps=claude --description 'Claude Code with tmux session mana
     end
 
     set -gx CLAUDE_MONITOR_ID $next
+
+    # Inject --dangerously-skip-permissions when running inside a devcontainer
+    set -l claude_args $argv
+    if set -q DEVCONTAINER
+        set claude_args --dangerously-skip-permissions $argv
+    end
 
     set -l short_cwd (string replace "$HOME" "~" "$PWD")
     set -l win_title "[$next] $short_cwd"
@@ -48,7 +56,7 @@ function claude --wraps=claude --description 'Claude Code with tmux session mana
         if set -q GHOSTTY_RESOURCES_DIR
             set env_setup "$env_setup; set -gx GHOSTTY_RESOURCES_DIR '$GHOSTTY_RESOURCES_DIR'"
         end
-        tmux send-keys -t $sess_name "$env_setup; command claude $argv" Enter
+        tmux send-keys -t $sess_name "$env_setup; command claude $claude_args" Enter
         tmux attach-session -t $sess_name
     else
         # Already in tmux — rename current window and run directly
@@ -56,6 +64,6 @@ function claude --wraps=claude --description 'Claude Code with tmux session mana
         tmux rename-window "$win_title"
         tmux set-option -g set-titles on 2>/dev/null
         tmux set-option -g set-titles-string "tmux #W" 2>/dev/null
-        command claude $argv
+        command claude $claude_args
     end
 end
