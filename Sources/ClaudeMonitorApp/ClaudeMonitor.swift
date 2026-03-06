@@ -149,6 +149,11 @@ class SessionReader: ObservableObject {
     private var hiddenAtUpdatedAt: [String: String] = [:]
     /// JSONL-derived data held in memory (never written to session files)
     private var derivedData: [String: DerivedSessionData] = [:]
+    /// Session IDs whose session files have disappeared (deleted by SessionEnd hook).
+    /// Prevents the recovery path from resurrecting intentionally ended sessions.
+    private var endedSessionIds: Set<String> = []
+    /// Session IDs that had files on the previous read cycle (used to detect disappearances).
+    private var previousSessionFileIds: Set<String> = []
     /// Serial queue for all disk I/O and state mutations (keeps main thread free for UI)
     private let ioQueue = DispatchQueue(label: "com.claudemonitor.sessionio", qos: .userInitiated)
 
@@ -635,6 +640,7 @@ class SessionReader: ObservableObject {
         let now = Date()
         var loaded: [SessionInfo] = []
         var loadedIds: Set<String> = []
+        var currentFileIds: Set<String> = []
 
         for file in files where file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
@@ -646,6 +652,7 @@ class SessionReader: ObservableObject {
             }
             do {
                 var session = try JSONDecoder().decode(SessionInfo.self, from: data)
+                currentFileIds.insert(session.session_id)
                 // Dead sessions: delete from disk and skip
                 if session.status == "dead" {
                     try? fm.removeItem(atPath: path)
@@ -688,6 +695,11 @@ class SessionReader: ObservableObject {
             }
         }
 
+        // Track session files that disappeared since last read (deleted by SessionEnd hook)
+        let disappeared = self.previousSessionFileIds.subtracting(currentFileIds)
+        self.endedSessionIds.formUnion(disappeared)
+        self.previousSessionFileIds = currentFileIds
+
         // Recovery: for derivedData entries with active JSONL but no session file,
         // create in-memory SessionInfo (monitor restart recovery / session file not yet written).
         // derivedData only holds JSONL modified within the last 2 minutes, so any entry here
@@ -696,6 +708,7 @@ class SessionReader: ObservableObject {
         let nowString = isoFmt.string(from: now)
         for (sessionId, derived) in derivedData {
             guard !loadedIds.contains(sessionId) else { continue }
+            guard !self.endedSessionIds.contains(sessionId) else { continue }
             // Use JSONL birth date as the best proxy for session start time.
             // Fall back to mtime, then now (last resort).
             let startDate = derived.jsonlBirthDate ?? derived.jsonlMtime ?? now
