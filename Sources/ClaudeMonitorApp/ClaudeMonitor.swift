@@ -1050,6 +1050,7 @@ func scoreGhosttyWindow(title: String, doc: String, cwd: String, sessionId: Stri
     guard lower.hasPrefix("tmux ") else { return 0 }
 
     // Highest priority: explicit numeric session ID match from claude.fish wrapper
+    let hasBracketId = title.range(of: #"\[\d+\]"#, options: .regularExpression) != nil
     if !sessionId.isEmpty,
        let match = title.range(of: #"\[(\d+)\]"#, options: .regularExpression) {
         let bracket = title[match]
@@ -1058,6 +1059,8 @@ func scoreGhosttyWindow(title: String, doc: String, cwd: String, sessionId: Stri
             return 40
         }
     }
+    // Title has [N] but doesn't match our sessionId — it's a different monitored session
+    if hasBracketId { return 0 }
 
     let cwdNormalized = (cwd.hasSuffix("/") ? cwd : cwd + "/").lowercased()
 
@@ -1250,6 +1253,7 @@ struct SessionRowView: View {
     let session: SessionInfo
     var teamInfo: TeamInfo? = nil
     var isActive: Bool = false
+    var disambiguationSuffix: String? = nil
     var onHide: (() -> Void)? = nil
     @State private var isHovered = false
     @State private var badgeScale: CGFloat = 1.0
@@ -1340,6 +1344,13 @@ struct SessionRowView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .layoutPriority(1)
+
+                    if let suffix = disambiguationSuffix {
+                        Text(suffix)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.35))
+                            .lineLimit(1)
+                    }
 
                     Spacer(minLength: 4)
 
@@ -1642,7 +1653,57 @@ struct MonitorContentView: View {
     @ObservedObject var activeTracker: ActiveSessionTracker
     @State private var isExpanded = true
 
+    /// Build a map of session_id → short disambiguating suffix for sessions that share a project name.
+    /// Uses first-letter abbreviation of the first differing path component walking upward.
+    private var disambiguationMap: [String: String] {
+        // Group sessions by project name
+        var byProject: [String: [SessionInfo]] = [:]
+        for s in reader.sessions {
+            byProject[s.project, default: []].append(s)
+        }
+
+        var result: [String: String] = [:]
+        for (_, group) in byProject {
+            guard group.count > 1 else { continue }
+
+            // Split each cwd into path components (drop the project basename at the end)
+            let paths: [(SessionInfo, [String])] = group.map { s in
+                var comps = s.cwd.split(separator: "/").map(String.init)
+                if !comps.isEmpty { comps.removeLast() } // drop basename (== project)
+                return (s, comps)
+            }
+
+            // Walk from the end of the parent path upward to find the first diverging component
+            let minLen = paths.map(\.1.count).min() ?? 0
+            var diffIdx: Int? = nil
+            for i in stride(from: minLen - 1, through: 0, by: -1) {
+                let vals = Set(paths.map { $0.1[i] })
+                if vals.count > 1 {
+                    diffIdx = i
+                    break
+                }
+            }
+
+            if let idx = diffIdx {
+                for (session, comps) in paths {
+                    let diffComp = comps[idx]
+                    let abbrev = String(diffComp.prefix(1))
+                    // Build abbreviated path: abbrev/project
+                    result[session.session_id] = "\(abbrev)/\(session.project)"
+                }
+            } else {
+                // All parent paths identical (shouldn't happen) — use full cwd
+                for (session, _) in paths {
+                    result[session.session_id] = session.cwd
+                }
+            }
+        }
+        return result
+    }
+
     var body: some View {
+        let disambigMap = disambiguationMap
+
         VStack(spacing: 0) {
             // Header — always visible, drag to move
             HeaderBar(
@@ -1660,6 +1721,7 @@ struct MonitorContentView: View {
                                 session: session,
                                 teamInfo: teamReader.teamsBySession[session.session_id],
                                 isActive: session.session_id == activeTracker.activeSessionId,
+                                disambiguationSuffix: disambigMap[session.session_id],
                                 onHide: { reader.hideSession(session.session_id, project: session.project, cwd: session.cwd, updatedAt: session.updated_at) }
                             )
                             .overlay(
