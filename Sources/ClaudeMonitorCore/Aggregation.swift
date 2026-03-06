@@ -23,7 +23,7 @@ public func aggregateSessions(
     referenceDate: Date = Date()
 ) -> [SessionInfo] {
     var grouped: [String: [SessionInfo]] = [:]
-    for s in sessions { grouped[s.project, default: []].append(s) }
+    for s in sessions { grouped["\(s.project)|\(s.cwd)", default: []].append(s) }
 
     // Merge groups that share the exact same CWD (different project names, same directory)
     var didMerge = true
@@ -115,6 +115,11 @@ public func aggregateSessions(
             }
         }
         merged.started_at = earliest
+
+        // Propagate skip_permissions if any session in group has it
+        if group.contains(where: { $0.skip_permissions == true }) {
+            merged.skip_permissions = true
+        }
 
         aggregated.append(merged)
     }

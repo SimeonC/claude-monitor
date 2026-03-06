@@ -606,10 +606,11 @@ class SessionReader: ObservableObject {
     }
 
     /// Hide a session from the UI. It will reappear if its updated_at changes (new activity).
-    func hideSession(_ id: String, project: String, updatedAt: String) {
+    func hideSession(_ id: String, project: String, cwd: String, updatedAt: String) {
+        let key = "\(project)|\(cwd)"
         ioQueue.async { [weak self] in
-            self?.hiddenProjects.insert(project)
-            self?.hiddenAtUpdatedAt[project] = updatedAt
+            self?.hiddenProjects.insert(key)
+            self?.hiddenAtUpdatedAt[key] = updatedAt
         }
         // Immediately remove from published list on main thread
         sessions.removeAll { $0.session_id == id }
@@ -744,20 +745,23 @@ class SessionReader: ObservableObject {
         // Aggregate sessions with the same project name
         var aggregated = aggregateSessions(loaded, referenceDate: Date())
 
-        // Unhide projects whose updated_at changed (new activity since hide)
+        // Unhide sessions whose updated_at changed (new activity since hide)
         for s in aggregated {
-            if let hiddenUpdatedAt = hiddenAtUpdatedAt[s.project],
+            let key = "\(s.project)|\(s.cwd)"
+            if let hiddenUpdatedAt = hiddenAtUpdatedAt[key],
                s.updated_at != hiddenUpdatedAt {
-                hiddenProjects.remove(s.project)
-                hiddenAtUpdatedAt.removeValue(forKey: s.project)
+                hiddenProjects.remove(key)
+                hiddenAtUpdatedAt.removeValue(forKey: key)
             }
         }
-        // Filter out hidden projects
-        aggregated.removeAll { hiddenProjects.contains($0.project) }
+        // Filter out hidden sessions
+        aggregated.removeAll { hiddenProjects.contains("\($0.project)|\($0.cwd)") }
 
-        // Sort alphabetically by project name for stable ordering
+        // Sort alphabetically by project name, then by cwd for stable ordering
         aggregated.sort {
-            $0.project.localizedCaseInsensitiveCompare($1.project) == .orderedAscending
+            let cmp = $0.project.localizedCaseInsensitiveCompare($1.project)
+            if cmp != .orderedSame { return cmp == .orderedAscending }
+            return $0.cwd.localizedCaseInsensitiveCompare($1.cwd) == .orderedAscending
         }
 
         // Debug: dump pipeline state to JSON for diagnosing status bugs
@@ -790,6 +794,7 @@ class SessionReader: ObservableObject {
             ]
             if let pct = s.context_pct { d["context_pct"] = pct }
             if let m = s.model { d["model"] = m }
+            if s.skip_permissions == true { d["skip_permissions"] = true }
             if s.agent_count > 0 { d["agent_count"] = s.agent_count }
             if let parent = s.parent_session_id { d["parent_session_id"] = parent }
             return d
@@ -1304,6 +1309,23 @@ struct SessionRowView: View {
                         }
                         .fixedSize()
                         .offset(y: 1)
+                    } else if session.skip_permissions == true {
+                        Image(systemName: "lock.open.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(session.statusColor)
+                            .shadow(color: session.statusColor.opacity(0.6), radius: session.status == "working" ? 4 : 0)
+                            .frame(width: 8, height: 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(Color.red.opacity(0.3))
+                                    .frame(width: 16, height: 16)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 3)
+                                    .stroke(Color.red.opacity(0.5), lineWidth: 1)
+                                    .frame(width: 16, height: 16)
+                            )
+                            .offset(y: 1)
                     } else {
                         PulsingDot(
                             color: session.statusColor,
@@ -1638,7 +1660,7 @@ struct MonitorContentView: View {
                                 session: session,
                                 teamInfo: teamReader.teamsBySession[session.session_id],
                                 isActive: session.session_id == activeTracker.activeSessionId,
-                                onHide: { reader.hideSession(session.session_id, project: session.project, updatedAt: session.updated_at) }
+                                onHide: { reader.hideSession(session.session_id, project: session.project, cwd: session.cwd, updatedAt: session.updated_at) }
                             )
                             .overlay(
                                 FirstMouseClickArea {

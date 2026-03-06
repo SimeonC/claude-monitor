@@ -120,12 +120,12 @@ final class AggregationTests: XCTestCase {
             "Sessions with same CWD but different project names should be merged")
     }
 
-    func testSessionsWithDifferentCWDsAreNotMerged() {
+    func testSessionsWithSameProjectButDifferentCWDsAreNotMerged() {
         let a = makeSession(id: "a", status: "idle", project: "proj", cwd: "/dir-a")
         let b = makeSession(id: "b", status: "idle", project: "proj", cwd: "/dir-b")
-        // Same project name → grouped together regardless (by project key, not CWD)
+        // Same project name but different CWD → separate rows (e.g. ~/Development/monolith vs .../workspaces/monolith)
         let result = aggregateSessions([a, b], referenceDate: referenceDate)
-        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.count, 2)
     }
 
     // MARK: - Terminal info merging
@@ -199,5 +199,31 @@ final class AggregationTests: XCTestCase {
         let result = aggregateSessions([noPrompt, withPrompt], referenceDate: referenceDate)
         XCTAssertEqual(result.count, 1)
         XCTAssertEqual(result[0].last_prompt, "hello world")
+    }
+
+    // MARK: - skip_permissions propagation
+
+    func testSkipPermissionsPropagatedOnMerge() {
+        let normal = makeSession(
+            id: "n", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        var skipPerms = makeSession(id: "s", status: "idle", project: "proj", cwd: "/proj")
+        skipPerms.skip_permissions = true
+        let result = aggregateSessions([normal, skipPerms], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].skip_permissions, true,
+            "Merged session should inherit skip_permissions from any group member")
+    }
+
+    func testSkipPermissionsNilWhenNoMemberHasIt() {
+        let a = makeSession(
+            id: "a", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        let b = makeSession(id: "b", status: "idle", project: "proj", cwd: "/proj")
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertNil(result[0].skip_permissions)
     }
 }

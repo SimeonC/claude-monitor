@@ -111,4 +111,26 @@ final class SessionInfoTests: XCTestCase {
         XCTAssertEqual(makeSession(status: "shutting_down").displayStatus, "exiting")
         XCTAssertEqual(makeSession(status: "custom_status").displayStatus, "custom_status")
     }
+
+    // MARK: - skip_permissions decoding
+
+    func testDecodeWithSkipPermissionsTrue() throws {
+        let json = """
+        {"session_id":"s1","status":"idle","project":"p","cwd":"/p",
+         "terminal":"","terminal_session_id":"","started_at":"","updated_at":"",
+         "last_prompt":"","agent_count":0,"skip_permissions":true}
+        """
+        let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(session.skip_permissions, true)
+    }
+
+    func testDecodeWithoutSkipPermissions() throws {
+        let json = """
+        {"session_id":"s2","status":"idle","project":"p","cwd":"/p",
+         "terminal":"","terminal_session_id":"","started_at":"","updated_at":"",
+         "last_prompt":"","agent_count":0}
+        """
+        let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
+        XCTAssertNil(session.skip_permissions)
+    }
 }

@@ -85,6 +85,25 @@ else
     IS_SUBAGENT=false
 fi
 
+# --- Detect --dangerously-skip-permissions flag ---
+# Walk up process tree to first `claude` ancestor and check its args.
+detect_skip_permissions() {
+    local pid=$$
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -z "$pid" ] || [ "$pid" = "1" ] || [ "$pid" = "0" ] && break
+        local comm
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)
+        if [ "$comm" = "claude" ]; then
+            if ps -ww -o args= -p "$pid" 2>/dev/null | grep -q -- '--dangerously-skip-permissions'; then
+                return 0
+            fi
+            return 1
+        fi
+    done
+    return 1
+}
+
 # --- Sub-agent session file helpers ---
 # Extract transcript_path from hook JSON; derive sub-agent ID and parent session ID.
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty')
@@ -257,6 +276,12 @@ set_working() {
 case "$EVENT" in
     SessionStart)
         cleanup_same_terminal
+        # Detect --dangerously-skip-permissions once at session start
+        if detect_skip_permissions; then
+            SKIP_PERMS=true
+        else
+            SKIP_PERMS=false
+        fi
         if [ -f "$SESSION_FILE" ] && [ -s "$SESSION_FILE" ]; then
             # Session file exists — backfill terminal and reboot if dead
             backfill_terminal
@@ -267,18 +292,37 @@ case "$EVENT" in
                     --arg updated "$NOW" \
                     '.status = $status | .updated_at = $updated'
             fi
+            # Persist skip_permissions flag (clear if not detected)
+            if [ "$SKIP_PERMS" = "true" ]; then
+                update_json_file "$SESSION_FILE" '.skip_permissions = true'
+            else
+                update_json_file "$SESSION_FILE" 'del(.skip_permissions)'
+            fi
         else
             # New session — create file with "starting" status
-            jq -n \
-                --arg sid "$SESSION_ID" \
-                --arg status "starting" \
-                --arg project "$PROJECT" \
-                --arg cwd "${CWD:-}" \
-                --arg terminal "$TERM_APP" \
-                --arg term_sid "$TERM_SID" \
-                --arg now "$NOW" \
-                '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0}' \
-                > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+            if [ "$SKIP_PERMS" = "true" ]; then
+                jq -n \
+                    --arg sid "$SESSION_ID" \
+                    --arg status "starting" \
+                    --arg project "$PROJECT" \
+                    --arg cwd "${CWD:-}" \
+                    --arg terminal "$TERM_APP" \
+                    --arg term_sid "$TERM_SID" \
+                    --arg now "$NOW" \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, skip_permissions: true}' \
+                    > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+            else
+                jq -n \
+                    --arg sid "$SESSION_ID" \
+                    --arg status "starting" \
+                    --arg project "$PROJECT" \
+                    --arg cwd "${CWD:-}" \
+                    --arg terminal "$TERM_APP" \
+                    --arg term_sid "$TERM_SID" \
+                    --arg now "$NOW" \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0}' \
+                    > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+            fi
         fi
         ;;
 
