@@ -1271,6 +1271,8 @@ struct SessionRowView: View {
     @State private var isHovered = false
     @State private var badgeScale: CGFloat = 1.0
 
+    private var isDanger: Bool { session.skip_permissions == true }
+
     private var badgeCount: Int {
         let teamCount = teamInfo?.activeAgentCount ?? 0
         // Subagents only run during a turn — if session is idle, agent_count is stale
@@ -1302,7 +1304,10 @@ struct SessionRowView: View {
                         .padding(.vertical, 2)
                         .background(
                             Capsule()
-                                .fill(session.statusColor.opacity(0.2))
+                                .fill(isDanger ? Color.red.opacity(0.3) : session.statusColor.opacity(0.2))
+                        )
+                        .overlay(
+                            isDanger ? Capsule().stroke(Color.red.opacity(0.5), lineWidth: 1) : nil
                         )
                         .scaleEffect(badgeScale)
                         .shadow(color: session.status == "working" ? session.statusColor.opacity(0.6) : .clear, radius: 4)
