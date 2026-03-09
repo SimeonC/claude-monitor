@@ -4,11 +4,17 @@ function claude --wraps=claude --description 'Claude Code with tmux session mana
     set -l next 1
     if test -f "$counter_file"
         set next (math (cat "$counter_file") + 1)
+        if test $next -gt 99
+            set next 1
+        end
     else
         # Migrate from old TMPDIR-based counter
         set -l old_counter "$TMPDIR/claude_monitor_counter"
         if test -f "$old_counter"
             set next (math (cat "$old_counter") + 1)
+            if test $next -gt 99
+                set next 1
+            end
         end
     end
     echo $next >"$counter_file"
