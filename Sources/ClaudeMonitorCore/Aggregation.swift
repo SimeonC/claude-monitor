@@ -23,13 +23,21 @@ public func aggregateSessions(
     referenceDate: Date = Date()
 ) -> [SessionInfo] {
     var grouped: [String: [SessionInfo]] = [:]
-    for s in sessions { grouped["\(s.project)|\(s.cwd)", default: []].append(s) }
+    for s in sessions {
+        // Sessions with a terminal_session_id get a unique key so they're never collapsed
+        if !s.terminal_session_id.isEmpty {
+            grouped["tid:\(s.terminal_session_id)", default: []].append(s)
+        } else {
+            grouped["\(s.project)|\(s.cwd)", default: []].append(s)
+        }
+    }
 
-    // Merge groups that share the exact same CWD (different project names, same directory)
+    // Merge groups that share the exact same CWD (different project names, same directory).
+    // Skip tid:-keyed groups — those must stay separate.
     var didMerge = true
     while didMerge {
         didMerge = false
-        let keys = Array(grouped.keys)
+        let keys = Array(grouped.keys).filter { !$0.hasPrefix("tid:") }
         outer: for i in 0..<keys.count {
             for j in (i + 1)..<keys.count {
                 let a = keys[i]

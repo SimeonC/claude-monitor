@@ -131,8 +131,8 @@ final class AggregationTests: XCTestCase {
     // MARK: - Terminal info merging
 
     func testTerminalInfoTakenFromFirstSessionThatHasIt() {
-        // Working session has no terminal info; idle has it
-        // Working beats idle on status, but should inherit terminal from idle
+        // Both have empty terminal_session_id (recovery sessions), so grouped by project|cwd.
+        // Working beats idle on status, but should inherit terminal name from idle.
         let noTerminal = makeSession(
             id: "w", status: "working", project: "proj", cwd: "/proj",
             terminal: "", terminalSessionId: "",
@@ -140,20 +140,20 @@ final class AggregationTests: XCTestCase {
         )
         let withTerminal = makeSession(
             id: "i", status: "idle", project: "proj", cwd: "/proj",
-            terminal: "ghostty", terminalSessionId: "/dev/ttys001"
+            terminal: "ghostty", terminalSessionId: ""
         )
         let result = aggregateSessions([noTerminal, withTerminal], referenceDate: referenceDate)
         XCTAssertEqual(result.count, 1)
         XCTAssertEqual(result[0].status, "working")
         XCTAssertEqual(result[0].terminal, "ghostty",
             "Terminal info should be inherited from first session that has it")
-        XCTAssertEqual(result[0].terminal_session_id, "/dev/ttys001")
     }
 
     func testTerminalInfoPreservedIfRepresentativeHasIt() {
+        // Both have empty terminal_session_id (recovery sessions), so grouped by project|cwd.
         let withTerminal = makeSession(
             id: "w", status: "working", project: "proj", cwd: "/proj",
-            terminal: "iterm2", terminalSessionId: "w0t0p0:GUID123",
+            terminal: "iterm2", terminalSessionId: "",
             updatedAt: referenceDate.addingTimeInterval(-10)
         )
         let noTerminal = makeSession(
@@ -225,5 +225,58 @@ final class AggregationTests: XCTestCase {
         let result = aggregateSessions([a, b], referenceDate: referenceDate)
         XCTAssertEqual(result.count, 1)
         XCTAssertNil(result[0].skip_permissions)
+    }
+
+    // MARK: - terminal_session_id grouping
+
+    func testSameTerminalSessionIdAggregated() {
+        let a = makeSession(id: "a", status: "idle", project: "proj", cwd: "/proj",
+            terminalSessionId: "/dev/ttys005")
+        let b = makeSession(id: "b", status: "working", project: "proj", cwd: "/proj",
+            terminalSessionId: "/dev/ttys005",
+            updatedAt: referenceDate.addingTimeInterval(-10))
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1,
+            "Sessions with the same terminal_session_id should be aggregated")
+    }
+
+    func testDifferentTerminalSessionIdSameProjectCwdNotAggregated() {
+        let a = makeSession(id: "a", status: "idle", project: "proj", cwd: "/proj",
+            terminalSessionId: "/dev/ttys003")
+        let b = makeSession(id: "b", status: "idle", project: "proj", cwd: "/proj",
+            terminalSessionId: "/dev/ttys004")
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 2,
+            "Sessions with different terminal_session_ids should NOT be aggregated even if project+cwd match")
+    }
+
+    func testTerminalSessionIdGroupsExemptFromCwdMerge() {
+        let a = makeSession(id: "a", status: "idle", project: "proj-a", cwd: "/shared/dir",
+            terminalSessionId: "/dev/ttys001")
+        let b = makeSession(id: "b", status: "idle", project: "proj-b", cwd: "/shared/dir",
+            terminalSessionId: "/dev/ttys002")
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 2,
+            "terminal_session_id groups should not be merged by CWD overlap")
+    }
+
+    func testEmptyTerminalSessionIdFallsBackToProjectCwdGrouping() {
+        let a = makeSession(id: "a", status: "idle", project: "proj", cwd: "/proj")
+        let b = makeSession(id: "b", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10))
+        // Both have empty terminal_session_id → should group by project|cwd
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1,
+            "Empty terminal_session_id sessions should fall back to project|cwd grouping")
+    }
+
+    func testMixedTerminalSessionIdAndEmptyNotMerged() {
+        let a = makeSession(id: "a", status: "idle", project: "proj", cwd: "/proj",
+            terminalSessionId: "/dev/ttys007")
+        let b = makeSession(id: "b", status: "idle", project: "proj", cwd: "/proj")
+        // b has empty terminal_session_id
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 2,
+            "Session with terminal_session_id should not merge with session without one")
     }
 }

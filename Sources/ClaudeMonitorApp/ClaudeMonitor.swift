@@ -143,10 +143,6 @@ class SessionReader: ObservableObject {
     private var refreshTimer: Timer?
     private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
-    /// Projects hidden by user via X button; auto-unhidden when any session's updated_at changes
-    private var hiddenProjects: Set<String> = []
-    /// The updated_at value at the time the project was hidden (to detect activity)
-    private var hiddenAtUpdatedAt: [String: String] = [:]
     /// JSONL-derived data held in memory (never written to session files)
     private var derivedData: [String: DerivedSessionData] = [:]
     /// Session IDs whose session files have disappeared (deleted by SessionEnd hook).
@@ -610,15 +606,18 @@ class SessionReader: ObservableObject {
         } catch { return nil }
     }
 
-    /// Hide a session from the UI. It will reappear if its updated_at changes (new activity).
-    func hideSession(_ id: String, project: String, cwd: String, updatedAt: String) {
-        let key = "\(project)|\(cwd)"
-        ioQueue.async { [weak self] in
-            self?.hiddenProjects.insert(key)
-            self?.hiddenAtUpdatedAt[key] = updatedAt
-        }
+    /// Delete a session's files from disk.
+    func deleteSession(_ id: String) {
         // Immediately remove from published list on main thread
         sessions.removeAll { $0.session_id == id }
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            try? fm.removeItem(atPath: "\(self.sessionsDir)/\(id).json")
+            try? fm.removeItem(atPath: "\(self.sessionsDir)/\(id).context")
+            try? fm.removeItem(atPath: "\(self.sessionsDir)/\(id).model")
+            self.endedSessionIds.insert(id)
+        }
     }
 
     func readSessions() {
@@ -755,25 +754,31 @@ class SessionReader: ObservableObject {
         // Replace loaded with parent-only sessions (children are hidden from UI)
         loaded = parentSessions
 
+        // Filter stale "starting" sessions and delete their files
+        let staleStarting = loaded.filter { $0.status == "starting" && $0.isStale }
+        if !staleStarting.isEmpty {
+            for s in staleStarting {
+                try? fm.removeItem(atPath: "\(sessionsDir)/\(s.session_id).json")
+                try? fm.removeItem(atPath: "\(sessionsDir)/\(s.session_id).context")
+                try? fm.removeItem(atPath: "\(sessionsDir)/\(s.session_id).model")
+                NSLog("[ClaudeMonitor] Deleted stale starting session %@", s.session_id)
+            }
+            let staleIds = Set(staleStarting.map(\.session_id))
+            loaded.removeAll { staleIds.contains($0.session_id) }
+        }
+
         // Aggregate sessions with the same project name
         var aggregated = aggregateSessions(loaded, referenceDate: Date())
 
-        // Unhide sessions whose updated_at changed (new activity since hide)
-        for s in aggregated {
-            let key = "\(s.project)|\(s.cwd)"
-            if let hiddenUpdatedAt = hiddenAtUpdatedAt[key],
-               s.updated_at != hiddenUpdatedAt {
-                hiddenProjects.remove(key)
-                hiddenAtUpdatedAt.removeValue(forKey: key)
-            }
-        }
-        // Filter out hidden sessions
-        aggregated.removeAll { hiddenProjects.contains("\($0.project)|\($0.cwd)") }
-
-        // Sort alphabetically by project name, then by cwd for stable ordering
+        // Sort by project → numeric terminal_session_id → string terminal_session_id → cwd
         aggregated.sort {
             let cmp = $0.project.localizedCaseInsensitiveCompare($1.project)
             if cmp != .orderedSame { return cmp == .orderedAscending }
+            let tid0 = $0.terminal_session_id
+            let tid1 = $1.terminal_session_id
+            // Numeric comparison when both are pure digits
+            if let n0 = Int(tid0), let n1 = Int(tid1) { return n0 < n1 }
+            if tid0 != tid1 { return tid0 < tid1 }
             return $0.cwd.localizedCaseInsensitiveCompare($1.cwd) == .orderedAscending
         }
 
@@ -793,7 +798,6 @@ class SessionReader: ObservableObject {
         let nowStr = isoFmt.string(from: Date())
 
         var debugDict: [String: Any] = ["timestamp": nowStr]
-        debugDict["hiddenProjects"] = Array(hiddenProjects).sorted()
 
         // Final aggregated sessions (what the UI shows)
         debugDict["sessions"] = aggregated.map { s -> [String: Any] in
@@ -1054,45 +1058,6 @@ func switchToTerminal(ttyPath: String) {
     }
 }
 
-/// Score a Ghostty window/tab title + AXDocument against a target CWD.
-/// Returns 0 (no match), 25 (title contains basename), 30 (AXDocument CWD match),
-/// or 40 (explicit session ID match via `[N]` in title).
-/// Only considers windows whose title starts with "tmux ".
-func scoreGhosttyWindow(title: String, doc: String, cwd: String, sessionId: String = "") -> Int {
-    let lower = title.lowercased()
-    guard lower.hasPrefix("tmux ") else { return 0 }
-
-    // Highest priority: explicit numeric session ID match from claude.fish wrapper
-    let hasBracketId = title.range(of: #"\[\d+\]"#, options: .regularExpression) != nil
-    if !sessionId.isEmpty,
-       let match = title.range(of: #"\[(\d+)\]"#, options: .regularExpression) {
-        let bracket = title[match]
-        let number = bracket.dropFirst().dropLast() // strip [ and ]
-        if String(number) == sessionId {
-            return 40
-        }
-    }
-    // Title has [N] but doesn't match our sessionId — it's a different monitored session
-    if hasBracketId { return 0 }
-
-    let cwdNormalized = (cwd.hasSuffix("/") ? cwd : cwd + "/").lowercased()
-
-    // Prefer AXDocument CWD match
-    if !doc.isEmpty, let url = URL(string: doc), url.scheme == "file" {
-        let docPath = url.path.lowercased()
-        let docNormalized = docPath.hasSuffix("/") ? docPath : docPath + "/"
-        if docNormalized == cwdNormalized {
-            return 30
-        }
-    }
-
-    // Fall back to title containing basename
-    let basename = (cwd as NSString).lastPathComponent.lowercased()
-    if lower.contains(basename) {
-        return 25
-    }
-    return 0
-}
 
 func switchToGhostty(cwd: String, ttyPath: String, sessionId: String = "") {
     let basename = (cwd as NSString).lastPathComponent
@@ -1267,7 +1232,7 @@ struct SessionRowView: View {
     var teamInfo: TeamInfo? = nil
     var isActive: Bool = false
     var disambiguationSuffix: String? = nil
-    var onHide: (() -> Void)? = nil
+    var onDelete: (() -> Void)? = nil
     @State private var isHovered = false
     @State private var badgeScale: CGFloat = 1.0
 
@@ -1383,13 +1348,13 @@ struct SessionRowView: View {
                         )
                         .fixedSize()
                         .overlay(alignment: .leading) {
-                            if onHide != nil && isHovered {
+                            if onDelete != nil && isHovered {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 10, weight: .semibold))
                                     .foregroundColor(.white.opacity(0.4))
                                     .overlay(
                                         FirstMouseClickArea {
-                                            onHide?()
+                                            onDelete?()
                                         }
                                     )
                                     .frame(width: 20, height: 20)
@@ -1684,6 +1649,18 @@ struct MonitorContentView: View {
         for (_, group) in byProject {
             guard group.count > 1 else { continue }
 
+            // If all sessions have simple numeric terminal_session_ids, use "[N]" suffix
+            let allNumeric = group.allSatisfy { s in
+                !s.terminal_session_id.isEmpty
+                && s.terminal_session_id.allSatisfy(\.isWholeNumber)
+            }
+            if allNumeric {
+                for s in group {
+                    result[s.session_id] = "[\(s.terminal_session_id)]"
+                }
+                continue
+            }
+
             // Split each cwd into path components (drop the project basename at the end)
             let paths: [(SessionInfo, [String])] = group.map { s in
                 var comps = s.cwd.split(separator: "/").map(String.init)
@@ -1706,11 +1683,10 @@ struct MonitorContentView: View {
                 for (session, comps) in paths {
                     let diffComp = comps[idx]
                     let abbrev = String(diffComp.prefix(1))
-                    // Build abbreviated path: abbrev/project
                     result[session.session_id] = "\(abbrev)/\(session.project)"
                 }
             } else {
-                // All parent paths identical (shouldn't happen) — use full cwd
+                // All parent paths identical — fall back to full cwd
                 for (session, _) in paths {
                     result[session.session_id] = session.cwd
                 }
@@ -1740,7 +1716,7 @@ struct MonitorContentView: View {
                                 teamInfo: teamReader.teamsBySession[session.session_id],
                                 isActive: session.session_id == activeTracker.activeSessionId,
                                 disambiguationSuffix: disambigMap[session.session_id],
-                                onHide: { reader.hideSession(session.session_id, project: session.project, cwd: session.cwd, updatedAt: session.updated_at) }
+                                onDelete: { reader.deleteSession(session.session_id) }
                             )
                             .overlay(
                                 FirstMouseClickArea {

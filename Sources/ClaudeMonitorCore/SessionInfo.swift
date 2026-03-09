@@ -21,17 +21,17 @@ public struct SessionInfo: Codable, Identifiable {
     public var id: String { session_id }
 
     public enum CodingKeys: String, CodingKey {
-        case session_id, status, project, cwd, terminal, terminal_session_id, started_at,
-            updated_at, last_prompt, agent_count, parent_session_id, context_pct, model,
-            skip_permissions
+        case session_id, status, project, cwd, terminal, terminal_session_id,
+            started_at, updated_at, last_prompt, agent_count, parent_session_id, context_pct,
+            model, skip_permissions
     }
 
     public init(
         session_id: String, status: String, project: String, cwd: String,
         terminal: String, terminal_session_id: String,
         started_at: String, updated_at: String, last_prompt: String,
-        agent_count: Int = 0, parent_session_id: String? = nil, context_pct: Int? = nil,
-        model: String? = nil, skip_permissions: Bool? = nil
+        agent_count: Int = 0, parent_session_id: String? = nil,
+        context_pct: Int? = nil, model: String? = nil, skip_permissions: Bool? = nil
     ) {
         self.session_id = session_id
         self.status = status
