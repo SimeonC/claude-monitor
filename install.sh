@@ -51,7 +51,8 @@ fi
 cp "$REPO_DIR/statusline.sh" "$HOOKS_DIR/statusline.sh"
 chmod +x "$HOOKS_DIR/statusline.sh"
 
-STATUSLINE_CMD="bash $HOME/.claude/hooks/statusline.sh"
+# Single-quotes: $HOME must stay literal so it resolves at runtime (works in devcontainers)
+STATUSLINE_CMD='bash $HOME/.claude/hooks/statusline.sh'
 jq --arg cmd "$STATUSLINE_CMD" '.statusLine = {"type": "command", "command": $cmd}' \
     "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
 echo "Configured statusLine hook in settings.json."

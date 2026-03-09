@@ -296,7 +296,10 @@ class SessionReader: ObservableObject {
                 !isSubagent,
                 let message = json["message"] as? [String: Any],
                 let content = message["content"] as? String,
-                !content.hasPrefix("<teammate-message")
+                !content.hasPrefix("<teammate-message"),
+                !content.hasPrefix("<local-command"),
+                !content.hasPrefix("<command-name>"),
+                !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             {
                 prompt = String(content.prefix(200))
             }
@@ -411,6 +414,7 @@ class SessionReader: ObservableObject {
                 var deadSessionIds: Set<String> = []
 
                 var ttyMap: [String: [String]] = [:]
+                var monitorIdMap: [String: [String]] = [:]
                 var itermSessions: [(id: String, termSid: String)] = []
                 var noInfoSessions: [SessionInfo] = []
 
@@ -424,14 +428,21 @@ class SessionReader: ObservableObject {
                     {
                         if Date().timeIntervalSince(mtime) > 43200 {
                             deadSessionIds.insert(session.session_id)
+                            continue
                         }
-                        continue
+                        // Numeric monitor IDs (e.g. devcontainer tmux sessions) can't be
+                        // checked via ps -t, so fall through to Ghostty liveness check.
+                        if Int(session.terminal_session_id) == nil {
+                            continue
+                        }
                     }
 
                     if session.terminal_session_id.isEmpty {
                         noInfoSessions.append(session)
                     } else if session.terminal == "iterm2" {
                         itermSessions.append((session.session_id, session.terminal_session_id))
+                    } else if Int(session.terminal_session_id) != nil {
+                        monitorIdMap[session.terminal_session_id, default: []].append(session.session_id)
                     } else {
                         let ttyName = session.terminal_session_id.replacingOccurrences(
                             of: "/dev/", with: "")
@@ -447,6 +458,21 @@ class SessionReader: ObservableObject {
                     if let output = self.runShell(script) {
                         for tty in output.split(separator: "\n").map(String.init) {
                             if let sids = ttyMap[tty] { deadSessionIds.formUnion(sids) }
+                        }
+                    }
+                }
+
+                // --- Fallback: Ghostty monitor ID check (devcontainer tmux sessions) ---
+                // Only prune if we successfully enumerated at least one live Ghostty tab;
+                // an empty set likely means AX failure, not "no tabs open".
+                if !monitorIdMap.isEmpty {
+                    let liveIds = self.liveGhosttyMonitorIds()
+                    NSLog("[ClaudeMonitor] Ghostty liveness: live=%@ checking=%@",
+                          liveIds.sorted().joined(separator: ","),
+                          monitorIdMap.keys.sorted().joined(separator: ","))
+                    if !liveIds.isEmpty {
+                        for (monitorId, sids) in monitorIdMap where !liveIds.contains(monitorId) {
+                            deadSessionIds.formUnion(sids)
                         }
                     }
                 }
@@ -588,6 +614,71 @@ class SessionReader: ObservableObject {
             return activeCount > 0
         }
         return false
+    }
+
+    /// Return set of live Ghostty monitor IDs by inspecting window/tab titles via accessibility APIs.
+    /// Titles look like "tmux [N] ~/path" — extract N for each visible tab.
+    /// Must dispatch to main thread since AX APIs are unreliable from background queues.
+    private func liveGhosttyMonitorIds() -> Set<String> {
+        // Called from DispatchQueue.global — AX needs main thread
+        return DispatchQueue.main.sync {
+            guard
+                let ghosttyApp = NSRunningApplication.runningApplications(
+                    withBundleIdentifier: "com.mitchellh.ghostty"
+                ).first
+                    ?? NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Ghostty" })
+            else { return [] }
+
+            let appElement = AXUIElementCreateApplication(ghosttyApp.processIdentifier)
+            var windowsRef: CFTypeRef?
+            guard
+                AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+                let windows = windowsRef as? [AXUIElement]
+            else { return [] }
+
+            var ids: Set<String> = []
+            let pattern = try! NSRegularExpression(pattern: #"tmux \[(\d+)\]"#)
+
+            func extractMonitorId(from title: String) {
+                let range = NSRange(title.startIndex..., in: title)
+                if let match = pattern.firstMatch(in: title, range: range),
+                   let numRange = Range(match.range(at: 1), in: title) {
+                    ids.insert(String(title[numRange]))
+                }
+            }
+
+            for window in windows {
+                var titleRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+                let windowTitle = titleRef as? String ?? ""
+                extractMonitorId(from: windowTitle)
+
+                // Check tabs
+                var childrenRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+                   let children = childrenRef as? [AXUIElement] {
+                    for child in children {
+                        var roleRef: CFTypeRef?
+                        AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleRef)
+                        if (roleRef as? String) == "AXTabGroup" {
+                            var tabsRef: CFTypeRef?
+                            if AXUIElementCopyAttributeValue(child, kAXChildrenAttribute as CFString, &tabsRef) == .success,
+                               let tabs = tabsRef as? [AXUIElement] {
+                                for tab in tabs {
+                                    var tabTitleRef: CFTypeRef?
+                                    AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &tabTitleRef)
+                                    if let tabTitle = tabTitleRef as? String {
+                                        extractMonitorId(from: tabTitle)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return ids
+        }
     }
 
     /// Run a shell command and return stdout, or nil on failure
@@ -1682,8 +1773,7 @@ struct MonitorContentView: View {
             if let idx = diffIdx {
                 for (session, comps) in paths {
                     let diffComp = comps[idx]
-                    let abbrev = String(diffComp.prefix(1))
-                    result[session.session_id] = "\(abbrev)/\(session.project)"
+                    result[session.session_id] = "\(diffComp)/\(session.project)"
                 }
             } else {
                 // All parent paths identical — fall back to full cwd
