@@ -254,7 +254,8 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Read the last ~4KB of a JSONL file to extract cwd, latest user prompt, timestamp, and whether it's a subagent.
+    /// Read the tail of a JSONL file to extract cwd, latest user prompt, timestamp, and whether it's a subagent.
+    /// Reads up to 64KB to ensure large assistant responses don't push user messages out of the window.
     private func readJSONLTail(path: String) -> (
         cwd: String, prompt: String, timestamp: String?, isSubagent: Bool
     ) {
@@ -265,14 +266,13 @@ class SessionReader: ObservableObject {
 
         let fileSize = fileHandle.seekToEndOfFile()
         guard fileSize > 0 else { return ("", "", nil, false) }
-        let readSize: UInt64 = min(fileSize, 4096)
+        let readSize: UInt64 = min(fileSize, 65536)
         fileHandle.seek(toFileOffset: fileSize - readSize)
         let data = fileHandle.readDataToEndOfFile()
         guard let text = String(data: data, encoding: .utf8) else { return ("", "", nil, false) }
 
         let lines = text.components(separatedBy: "\n")
         var cwd = ""
-        var prompt = ""
         var timestamp: String? = nil
         var isSubagent = false
 
@@ -291,7 +291,16 @@ class SessionReader: ObservableObject {
             if json["agentName"] != nil {
                 isSubagent = true
             }
-            // Extract user prompts: type=="user", message.content is a plain string (not tool results or teammate messages)
+        }
+
+        // Search backwards for the last non-blank, non-skipped user message
+        var prompt = ""
+        for line in lines.reversed() {
+            guard !line.isEmpty,
+                let lineData = line.data(using: .utf8),
+                let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+            else { continue }
+
             if let type = json["type"] as? String, type == "user",
                 !isSubagent,
                 let message = json["message"] as? [String: Any],
@@ -302,6 +311,7 @@ class SessionReader: ObservableObject {
                 !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             {
                 prompt = String(content.prefix(200))
+                break
             }
         }
 
@@ -376,11 +386,16 @@ class SessionReader: ObservableObject {
                         }
                     }
 
+                    // Preserve previously cached prompt when JSONL tail doesn't contain one
+                    let effectivePrompt = lastPrompt.isEmpty
+                        ? (self.derivedData[sessionId]?.lastPrompt ?? "")
+                        : lastPrompt
+
                     let birthDate = attrs[.creationDate] as? Date
                     newDerived[sessionId] = DerivedSessionData(
                         project: project,
                         cwd: cwd,
-                        lastPrompt: lastPrompt,
+                        lastPrompt: effectivePrompt,
                         agentCount: agentCount,
                         jsonlMtime: mtime,
                         jsonlBirthDate: birthDate,
