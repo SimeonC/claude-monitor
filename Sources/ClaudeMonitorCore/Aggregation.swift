@@ -129,6 +129,9 @@ public func aggregateSessions(
             merged.skip_permissions = true
         }
 
+        // Track all session_ids from the group for team lead matching post-aggregation
+        merged.merged_session_ids = group.map { $0.session_id }
+
         aggregated.append(merged)
     }
 

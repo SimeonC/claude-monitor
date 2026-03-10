@@ -276,8 +276,9 @@ set_working() {
 case "$EVENT" in
     SessionStart)
         cleanup_same_terminal
-        # Detect --dangerously-skip-permissions once at session start
-        if detect_skip_permissions; then
+        # Detect --dangerously-skip-permissions once at session start.
+        # Fallback: devcontainer sessions always run with skip-permissions (injected by claude.fish).
+        if detect_skip_permissions || [ -n "${DEVCONTAINER:-}" ]; then
             SKIP_PERMS=true
         else
             SKIP_PERMS=false

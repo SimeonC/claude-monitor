@@ -17,13 +17,16 @@ public struct SessionInfo: Codable, Identifiable {
     public var context_pct: Int?
     public var model: String?
     public var skip_permissions: Bool?
+    /// When sessions are aggregated, holds all session_ids from the merged group.
+    /// nil when no merge occurred (single session). Used for team lead matching post-aggregation.
+    public var merged_session_ids: [String]?
 
     public var id: String { session_id }
 
     public enum CodingKeys: String, CodingKey {
         case session_id, status, project, cwd, terminal, terminal_session_id,
             started_at, updated_at, last_prompt, agent_count, parent_session_id, context_pct,
-            model, skip_permissions
+            model, skip_permissions, merged_session_ids
     }
 
     public init(
@@ -31,7 +34,8 @@ public struct SessionInfo: Codable, Identifiable {
         terminal: String, terminal_session_id: String,
         started_at: String, updated_at: String, last_prompt: String,
         agent_count: Int = 0, parent_session_id: String? = nil,
-        context_pct: Int? = nil, model: String? = nil, skip_permissions: Bool? = nil
+        context_pct: Int? = nil, model: String? = nil, skip_permissions: Bool? = nil,
+        merged_session_ids: [String]? = nil
     ) {
         self.session_id = session_id
         self.status = status
@@ -47,6 +51,7 @@ public struct SessionInfo: Codable, Identifiable {
         self.context_pct = context_pct
         self.model = model
         self.skip_permissions = skip_permissions
+        self.merged_session_ids = merged_session_ids
     }
 
     public init(from decoder: Decoder) throws {
@@ -65,6 +70,7 @@ public struct SessionInfo: Codable, Identifiable {
         context_pct = try? c.decode(Int.self, forKey: .context_pct)
         model = try? c.decode(String.self, forKey: .model)
         skip_permissions = try? c.decode(Bool.self, forKey: .skip_permissions)
+        merged_session_ids = try? c.decode([String].self, forKey: .merged_session_ids)
     }
 
     public var shortModelName: String? {

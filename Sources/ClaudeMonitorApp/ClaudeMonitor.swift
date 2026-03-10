@@ -71,6 +71,16 @@ class TeamReader: ObservableObject {
             self.teamsBySession = result
         }
     }
+
+    /// Look up team info for a session, checking merged_session_ids for aggregated sessions.
+    func teamInfo(for session: SessionInfo) -> TeamInfo? {
+        if let info = teamsBySession[session.session_id] { return info }
+        guard let mergedIds = session.merged_session_ids else { return nil }
+        for sid in mergedIds {
+            if let info = teamsBySession[sid] { return info }
+        }
+        return nil
+    }
 }
 
 // MARK: - Directory Watcher (FSEvents)
@@ -1324,6 +1334,7 @@ struct SessionRowView: View {
     @State private var badgeScale: CGFloat = 1.0
 
     private var isDanger: Bool { session.skip_permissions == true }
+    private var hasTeam: Bool { teamInfo != nil }
 
     private var badgeCount: Int {
         let teamCount = teamInfo?.activeAgentCount ?? 0
@@ -1344,12 +1355,14 @@ struct SessionRowView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    if badgeCount > 0 {
+                    if badgeCount > 0 || hasTeam {
                         HStack(spacing: 3) {
-                            Image(systemName: "person.2.fill")
+                            Image(systemName: hasTeam ? "person.3.fill" : "person.2.fill")
                                 .font(.system(size: 8))
-                            Text("\(badgeCount)")
-                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            if badgeCount > 0 {
+                                Text("\(badgeCount)")
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            }
                         }
                         .foregroundColor(session.statusColor)
                         .padding(.horizontal, 5)
@@ -1799,7 +1812,7 @@ struct MonitorContentView: View {
                         ForEach(reader.sessions) { session in
                             SessionRowView(
                                 session: session,
-                                teamInfo: teamReader.teamsBySession[session.session_id],
+                                teamInfo: teamReader.teamInfo(for: session),
                                 isActive: session.session_id == activeTracker.activeSessionId,
                                 disambiguationSuffix: disambigMap[session.session_id],
                                 onDelete: { reader.deleteSession(session.session_id) }

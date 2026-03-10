@@ -227,6 +227,71 @@ final class AggregationTests: XCTestCase {
         XCTAssertNil(result[0].skip_permissions)
     }
 
+    // MARK: - merged_session_ids tracking
+
+    func testMergedSessionIdsContainsAllGroupMembers() {
+        // Scenario: qr-code-ordering has 4 sessions sharing terminal_session_id "55".
+        // One is a team lead (idle), others are working subagents.
+        // After aggregation, the representative is a "working" session, but we need
+        // ALL session_ids preserved so team matching (keyed by leadSessionId) still works.
+        let teamLead = makeSession(
+            id: "ba0b2782", status: "idle", project: "qr-code-ordering",
+            cwd: "/workspaces/qr-code-ordering", terminalSessionId: "55"
+        )
+        let worker1 = makeSession(
+            id: "25218267", status: "working", project: "qr-code-ordering",
+            cwd: "/workspaces/qr-code-ordering", terminalSessionId: "55",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        let worker2 = makeSession(
+            id: "9d97c36d", status: "working", project: "qr-code-ordering",
+            cwd: "/workspaces/qr-code-ordering", terminalSessionId: "55",
+            updatedAt: referenceDate.addingTimeInterval(-20)
+        )
+
+        let result = aggregateSessions([teamLead, worker1, worker2], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        // The representative should be "working" (higher priority than idle)
+        XCTAssertEqual(result[0].status, "working")
+        // ALL session IDs from the group must be discoverable for team matching
+        let mergedIds = result[0].merged_session_ids ?? []
+        XCTAssertTrue(mergedIds.contains("ba0b2782"),
+            "Team lead session_id must be preserved in merged_session_ids")
+        XCTAssertTrue(mergedIds.contains("25218267"),
+            "Representative session_id must be in merged_session_ids")
+        XCTAssertTrue(mergedIds.contains("9d97c36d"),
+            "All group member session_ids must be in merged_session_ids")
+    }
+
+    func testSingleSessionHasNoMergedSessionIds() {
+        let session = makeSession(id: "s1", status: "idle", project: "proj", cwd: "/proj",
+            terminalSessionId: "42")
+        let result = aggregateSessions([session], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertNil(result[0].merged_session_ids,
+            "Single sessions should not have merged_session_ids (no merge happened)")
+    }
+
+    func testSkipPermissionsPropagatedAcrossTerminalSessionIdGroup() {
+        // Scenario: devcontainer session where skip_permissions is set on one session
+        // but the representative is a different session. skip_permissions must propagate.
+        var withSkip = makeSession(
+            id: "lead", status: "idle", project: "proj",
+            cwd: "/proj", terminalSessionId: "55"
+        )
+        withSkip.skip_permissions = true
+        let worker = makeSession(
+            id: "worker", status: "working", project: "proj",
+            cwd: "/proj", terminalSessionId: "55",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        let result = aggregateSessions([withSkip, worker], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].status, "working")
+        XCTAssertEqual(result[0].skip_permissions, true,
+            "skip_permissions must propagate even when the session with the flag is not the representative")
+    }
+
     // MARK: - terminal_session_id grouping
 
     func testSameTerminalSessionIdAggregated() {
