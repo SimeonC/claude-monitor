@@ -431,11 +431,10 @@ class SessionReader: ObservableObject {
                 var ttyMap: [String: [String]] = [:]
                 var monitorIdMap: [String: [String]] = [:]
                 var itermSessions: [(id: String, termSid: String)] = []
-                var noInfoSessions: [SessionInfo] = []
 
                 for (session, _) in currentSessions {
                     if session.status == "dead" { continue }
-                    if session.status == "starting" && !session.isStale { continue }
+                    if session.status == "idle" || session.status == "starting" { continue }
 
                     if let jsonlPath = self.findJSONLPath(sessionId: session.session_id),
                         let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath),
@@ -453,7 +452,7 @@ class SessionReader: ObservableObject {
                     }
 
                     if session.terminal_session_id.isEmpty {
-                        noInfoSessions.append(session)
+                        continue
                     } else if session.terminal == "iterm2" {
                         itermSessions.append((session.session_id, session.terminal_session_id))
                     } else if Int(session.terminal_session_id) != nil {
@@ -558,11 +557,6 @@ class SessionReader: ObservableObject {
                             }
                         }
                     }
-                }
-
-                // --- Fallback: no JSONL and no terminal info → use staleness ---
-                for session in noInfoSessions where session.isStale {
-                    deadSessionIds.insert(session.session_id)
                 }
 
                 // --- Safety net: sessions stuck in "working" for 10+ min ---
@@ -859,19 +853,6 @@ class SessionReader: ObservableObject {
         }
         // Replace loaded with parent-only sessions (children are hidden from UI)
         loaded = parentSessions
-
-        // Filter stale "starting" sessions and delete their files
-        let staleStarting = loaded.filter { $0.status == "starting" && $0.isStale }
-        if !staleStarting.isEmpty {
-            for s in staleStarting {
-                try? fm.removeItem(atPath: "\(sessionsDir)/\(s.session_id).json")
-                try? fm.removeItem(atPath: "\(sessionsDir)/\(s.session_id).context")
-                try? fm.removeItem(atPath: "\(sessionsDir)/\(s.session_id).model")
-                NSLog("[ClaudeMonitor] Deleted stale starting session %@", s.session_id)
-            }
-            let staleIds = Set(staleStarting.map(\.session_id))
-            loaded.removeAll { staleIds.contains($0.session_id) }
-        }
 
         // Aggregate sessions with the same project name
         var aggregated = aggregateSessions(loaded, referenceDate: Date())
