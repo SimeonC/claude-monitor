@@ -318,6 +318,7 @@ class SessionReader: ObservableObject {
                 !content.hasPrefix("<teammate-message"),
                 !content.hasPrefix("<local-command"),
                 !content.hasPrefix("<command-name>"),
+                !content.hasPrefix("<task-notification>"),
                 !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             {
                 prompt = String(content.prefix(200))
