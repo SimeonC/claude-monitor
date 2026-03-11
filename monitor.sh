@@ -294,7 +294,7 @@ case "$EVENT" in
             # Session file exists — backfill terminal and reboot if dead
             backfill_terminal
             CURRENT_STATUS=$(jq -r '.status // ""' "$SESSION_FILE" 2>/dev/null)
-            if [ "$CURRENT_STATUS" = "dead" ]; then
+            if [ "$CURRENT_STATUS" = "dead" ] || [ "$CURRENT_STATUS" = "ended" ]; then
                 update_json_file "$SESSION_FILE" \
                     --arg status "idle" \
                     --arg updated "$NOW" \
@@ -369,8 +369,16 @@ case "$EVENT" in
         ;;
 
     SessionEnd)
-        # Session ended — delete session and sidecar files
-        rm -f "$SESSION_FILE" "$SESSIONS_DIR/${SESSION_ID}.context" "$SESSIONS_DIR/${SESSION_ID}.model"
+        # Session ended — soft-delete: set status to "ended" (preserves terminal_session_id
+        # so SessionStart can reuse it instead of re-detecting the wrong terminal).
+        # Still delete sidecar files.
+        if [ -f "$SESSION_FILE" ]; then
+            update_json_file "$SESSION_FILE" \
+                --arg status "ended" \
+                --arg updated "$NOW" \
+                '.status = $status | .updated_at = $updated'
+        fi
+        rm -f "$SESSIONS_DIR/${SESSION_ID}.context" "$SESSIONS_DIR/${SESSION_ID}.model"
         ;;
 
     SubagentStart)

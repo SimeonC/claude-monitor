@@ -158,6 +158,8 @@ class SessionReader: ObservableObject {
     /// Session IDs whose session files have disappeared (deleted by SessionEnd hook).
     /// Prevents the recovery path from resurrecting intentionally ended sessions.
     private var endedSessionIds: Set<String> = []
+    /// Tracks when each session first entered "ended" status (for grace period before cleanup).
+    private var endedTimestamps: [String: Date] = [:]
     /// Session IDs that had files on the previous read cycle (used to detect disappearances).
     private var previousSessionFileIds: Set<String> = []
     /// Serial queue for all disk I/O and state mutations (keeps main thread free for UI)
@@ -445,7 +447,7 @@ class SessionReader: ObservableObject {
 
                 for (session, _) in currentSessions {
                     if session.status == "dead" { continue }
-                    if session.status == "idle" || session.status == "starting" { continue }
+                    if session.status == "idle" || session.status == "starting" || session.status == "ended" { continue }
 
                     if let jsonlPath = self.findJSONLPath(sessionId: session.session_id),
                         let attrs = try? FileManager.default.attributesOfItem(atPath: jsonlPath),
@@ -687,29 +689,30 @@ class SessionReader: ObservableObject {
     func relinkGhosttySession(_ session: SessionInfo) {
         let script = "tell application \"Ghostty\" to return id of focused terminal of selected tab of front window"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
             guard let appleScript = NSAppleScript(source: script) else { return }
             var error: NSDictionary?
             let result = appleScript.executeAndReturnError(&error)
             guard error == nil, let termId = result.stringValue, !termId.isEmpty else { return }
+            let sessionId = session.session_id
 
-            DispatchQueue.main.async {
-                guard let self = self,
-                      let idx = self.sessions.firstIndex(where: { $0.session_id == session.session_id })
+            // Persist to disk first (on ioQueue), then update in-memory model on main.
+            // This prevents a concurrent readSessions() from overwriting the change.
+            self.ioQueue.async {
+                let path = "\(self.sessionsDir)/\(sessionId).json"
+                guard let data = FileManager.default.contents(atPath: path),
+                      var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else { return }
-                self.sessions[idx].terminal_session_id = termId
-
-                // Persist to session JSON file
-                self.ioQueue.async {
-                    let path = "\(self.sessionsDir)/\(session.session_id).json"
-                    guard let data = FileManager.default.contents(atPath: path),
-                          var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    else { return }
-                    json["terminal_session_id"] = termId
-                    if let updated = try? JSONSerialization.data(withJSONObject: json),
-                       let str = String(data: updated, encoding: .utf8) {
-                        let tmp = path + ".tmp"
-                        try? str.write(toFile: tmp, atomically: true, encoding: .utf8)
-                        try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+                json["terminal_session_id"] = termId
+                if let updated = try? JSONSerialization.data(withJSONObject: json),
+                   let str = String(data: updated, encoding: .utf8) {
+                    let tmp = path + ".tmp"
+                    try? str.write(toFile: tmp, atomically: true, encoding: .utf8)
+                    try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+                }
+                DispatchQueue.main.async {
+                    if let idx = self.sessions.firstIndex(where: { $0.session_id == sessionId }) {
+                        self.sessions[idx].terminal_session_id = termId
                     }
                 }
             }
@@ -755,6 +758,23 @@ class SessionReader: ObservableObject {
                     try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
                     continue
                 }
+                // Ended sessions: don't show in UI; give 5s grace for SessionStart to reactivate
+                if session.status == "ended" {
+                    if endedTimestamps[session.session_id] == nil {
+                        endedTimestamps[session.session_id] = now
+                    }
+                    if now.timeIntervalSince(endedTimestamps[session.session_id]!) >= 5 {
+                        // Grace period expired — clean up
+                        try? fm.removeItem(atPath: path)
+                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
+                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
+                        endedTimestamps.removeValue(forKey: session.session_id)
+                        endedSessionIds.insert(session.session_id)
+                    }
+                    continue
+                }
+                // Session reactivated from "ended" — clear its timestamp
+                endedTimestamps.removeValue(forKey: session.session_id)
                 // Read context_pct from sidecar file
                 let contextPath = "\(sessionsDir)/\(session.session_id).context"
                 if let contextData = fm.contents(atPath: contextPath),
@@ -1691,21 +1711,25 @@ struct MonitorContentView: View {
                                 disambiguationSuffix: disambigMap[session.session_id]
                             )
                             .overlay(
-                                FirstMouseClickArea {
-                                    switchToSession(session)
-                                    activeTracker.activeSessionId = session.session_id
-                                }
-                            )
-                            .contextMenu {
-                                if session.terminal == "ghostty" {
-                                    Button("Relink to Focused Tab") {
-                                        reader.relinkGhosttySession(session)
+                                FirstMouseClickArea(
+                                    action: {
+                                        switchToSession(session)
+                                        activeTracker.activeSessionId = session.session_id
+                                    },
+                                    contextMenuBuilder: { event in
+                                        let menu = NSMenu()
+                                        if session.terminal == "ghostty" {
+                                            menu.addItem(ClosureMenuItem("Relink to Focused Tab") {
+                                                reader.relinkGhosttySession(session)
+                                            })
+                                        }
+                                        menu.addItem(ClosureMenuItem("Delete Session") {
+                                            reader.deleteSession(session.session_id)
+                                        })
+                                        return menu
                                     }
-                                }
-                                Button("Delete Session") {
-                                    reader.deleteSession(session.session_id)
-                                }
-                            }
+                                )
+                            )
                             if session.id != reader.sessions.last?.id {
                                 Divider()
                                     .background(Color.white.opacity(0.05))
@@ -1914,23 +1938,73 @@ private class ClickAreaCoordinator {
             best?.action?()
             return event
         }) { monitors.append(m) }
+
+        // Right-click: find smallest containing click area with a context menu builder
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown, handler: { [weak self] event in
+            guard let self = self else { return event }
+            var best: FirstMouseClickArea.ClickNSView?
+            var bestArea: CGFloat = .greatestFiniteMagnitude
+            for weak in self.areas {
+                guard let view = weak.view, view.contextMenuAction != nil,
+                      let window = view.window, event.window === window else { continue }
+                let loc = view.convert(event.locationInWindow, from: nil)
+                if view.bounds.contains(loc) {
+                    let area = view.bounds.width * view.bounds.height
+                    if area < bestArea {
+                        best = view
+                        bestArea = area
+                    }
+                }
+            }
+            if let view = best, let menu = view.contextMenuAction?(event) {
+                NSMenu.popUpContextMenu(menu, with: event, for: view)
+                return nil  // consume the event
+            }
+            return event
+        }) { monitors.append(m) }
     }
+}
+
+/// NSMenuItem that holds a closure — fires via target-action.
+class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+    init(_ title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        self.target = self
+    }
+    @available(*, unavailable) required init(coder: NSCoder) { fatalError() }
+    @objc private func fire() { handler() }
 }
 
 struct FirstMouseClickArea: NSViewRepresentable {
     let action: () -> Void
+    var contextMenuBuilder: ((NSEvent) -> NSMenu?)?
+
+    init(action: @escaping () -> Void) {
+        self.action = action
+        self.contextMenuBuilder = nil
+    }
+
+    init(action: @escaping () -> Void, contextMenuBuilder: @escaping (NSEvent) -> NSMenu?) {
+        self.action = action
+        self.contextMenuBuilder = contextMenuBuilder
+    }
 
     func makeNSView(context: Context) -> ClickNSView {
         let view = ClickNSView()
         view.action = action
+        view.contextMenuAction = contextMenuBuilder
         return view
     }
     func updateNSView(_ nsView: ClickNSView, context: Context) {
         nsView.action = action
+        nsView.contextMenuAction = contextMenuBuilder
     }
 
     class ClickNSView: NSView {
         var action: (() -> Void)?
+        var contextMenuAction: ((NSEvent) -> NSMenu?)?
 
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
