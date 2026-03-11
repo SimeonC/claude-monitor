@@ -382,7 +382,17 @@ class SessionReader: ObservableObject {
                     // No cwd in tail → can't determine project, skip
                     if cwd.isEmpty { continue }
 
-                    let project = (cwd as NSString).lastPathComponent
+                    // If the new CWD is a subdirectory of a previously cached CWD,
+                    // keep the original — prevents title flickering after `cd` in Bash
+                    let existingCwd = self.derivedData[sessionId]?.cwd ?? ""
+                    let effectiveCwd: String
+                    if !existingCwd.isEmpty && cwd.hasPrefix(existingCwd + "/") {
+                        effectiveCwd = existingCwd
+                    } else {
+                        effectiveCwd = cwd
+                    }
+
+                    let project = (effectiveCwd as NSString).lastPathComponent
 
                     // Count active subagents
                     let subagentsDir = "\(projectPath)/\(sessionId)/subagents"
@@ -407,7 +417,7 @@ class SessionReader: ObservableObject {
                     let birthDate = attrs[.creationDate] as? Date
                     newDerived[sessionId] = DerivedSessionData(
                         project: project,
-                        cwd: cwd,
+                        cwd: effectiveCwd,
                         lastPrompt: effectivePrompt,
                         agentCount: agentCount,
                         jsonlMtime: mtime,
