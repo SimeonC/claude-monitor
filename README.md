@@ -70,6 +70,18 @@ If you use [fish](https://fishshell.com/), run the fish integration script after
 
 This installs `claude.fish` to `~/.config/fish/functions/`, which wraps the `claude` command with tmux session management and session ID tracking for the monitor.
 
+#### Devcontainers
+
+Click-to-switch works inside devcontainers if you set the `GHOSTTY_TERMINAL_UUID` environment variable before launching Claude. Since `osascript` isn't available inside containers, the hook can't detect the Ghostty terminal UUID at runtime. Instead, capture it on the host and forward it in:
+
+```bash
+# On the host, before entering the container:
+TERM_UUID=$(osascript -e 'tell application "Ghostty" to return id of focused terminal of selected tab of front window')
+devcontainer exec --remote-env "GHOSTTY_TERMINAL_UUID=$TERM_UUID" -- claude
+```
+
+The monitor hook checks for this variable first and uses it directly, skipping the AppleScript call.
+
 ### Uninstall
 
 ```bash

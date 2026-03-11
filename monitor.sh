@@ -181,6 +181,12 @@ detect_terminal() {
     local term_app=""
     local term_session_id=""
 
+    # Pre-captured Ghostty UUID (e.g. forwarded into devcontainers via --remote-env)
+    if [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then
+        echo "ghostty|$GHOSTTY_TERMINAL_UUID"
+        return
+    fi
+
     if [ -n "${ITERM_SESSION_ID:-}" ]; then
         echo "iterm2|$ITERM_SESSION_ID"
         return

@@ -1002,6 +1002,8 @@ class ActiveSessionTracker: ObservableObject {
                 DispatchQueue.main.async { self?.activeSessionId = nil }
                 return
             }
+            let ghosttySessions = sessions.filter { $0.terminal == "ghostty" }
+            debugLog("detectGhostty: focused=\(termId) ghosttySessions=\(ghosttySessions.map { "\($0.session_id)=\($0.terminal_session_id)" }.joined(separator: ", "))")
             let matched = sessions.first { session in
                 session.terminal == "ghostty" && session.terminal_session_id == termId
             }
@@ -1052,12 +1054,28 @@ class ActiveSessionTracker: ObservableObject {
     }
 }
 
+// MARK: - Debug Logging
+
+private let debugLogPath = NSHomeDirectory() + "/.claude/monitor/debug.log"
+
+func debugLog(_ message: String) {
+    let timestamp = ISO8601DateFormatter().string(from: Date())
+    let line = "[\(timestamp)] \(message)\n"
+    if let data = line.data(using: .utf8) {
+        if let fh = FileHandle(forWritingAtPath: debugLogPath) {
+            fh.seekToEndOfFile()
+            fh.write(data)
+            fh.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: debugLogPath, contents: data)
+        }
+    }
+}
+
 // MARK: - Terminal Switcher
 
 func switchToSession(_ session: SessionInfo) {
-    NSLog(
-        "[ClaudeMonitor] switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project) cwd=\(session.cwd) sid=\(session.session_id)"
-    )
+    debugLog("switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project) sid=\(session.session_id)")
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
     } else if session.terminal == "ghostty" {
@@ -1130,16 +1148,24 @@ func switchToTerminal(ttyPath: String) {
 
 
 func switchToGhostty(sessionId: String) {
+    debugLog("switchToGhostty: sessionId=\(sessionId)")
     if sessionId.contains("-") {
         // UUID — focus directly via AppleScript
         let script = "tell application \"Ghostty\" to focus terminal id \"\(sessionId)\""
+        debugLog("switchToGhostty: running AppleScript: \(script)")
         if let appleScript = NSAppleScript(source: script) {
             var error: NSDictionary?
             appleScript.executeAndReturnError(&error)
-            if error == nil { return }
+            if let error = error {
+                debugLog("switchToGhostty: AppleScript error: \(error)")
+            } else {
+                debugLog("switchToGhostty: success")
+                return
+            }
         }
     }
     // Fallback: just activate the app
+    debugLog("switchToGhostty: falling back to activate")
     NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first?.activate()
 }
 
