@@ -34,7 +34,7 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - **Global keyboard shortcuts** to cycle between sessions needing attention
 - **Team agent badges** when sessions spawn sub-agents
 - **Project name, elapsed time, and last prompt** preview per session
-- **Kill any session** with one click (hover to reveal the X)
+- **Right-click context menu** to delete sessions or relink Ghostty tabs
 - **Always-on-top** dark glass panel, visible on all Spaces, no dock icon
 - **Auto-discovery** via JSONL scanning — sessions appear without manual refresh
 
@@ -46,7 +46,7 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** CLI
 - **Xcode Command Line Tools** — `xcode-select --install`
 - **jq** — `brew install jq`
-- **Ghostty, iTerm2, or Terminal.app**
+- **Ghostty 1.3.0+, iTerm2, or Terminal.app**
 
 ### Setup
 

@@ -440,7 +440,7 @@ class SessionReader: ObservableObject {
                 var deadSessionIds: Set<String> = []
 
                 var ttyMap: [String: [String]] = [:]
-                var monitorIdMap: [String: [String]] = [:]
+                var ghosttyTerminalIds: [String: [String]] = [:]
                 var itermSessions: [(id: String, termSid: String)] = []
 
                 for (session, _) in currentSessions {
@@ -455,9 +455,8 @@ class SessionReader: ObservableObject {
                             deadSessionIds.insert(session.session_id)
                             continue
                         }
-                        // Numeric monitor IDs (e.g. devcontainer tmux sessions) can't be
-                        // checked via ps -t, so fall through to Ghostty liveness check.
-                        if Int(session.terminal_session_id) == nil {
+                        // Ghostty UUID sessions (contain "-") need AppleScript liveness check
+                        if !session.terminal_session_id.contains("-") {
                             continue
                         }
                     }
@@ -466,8 +465,8 @@ class SessionReader: ObservableObject {
                         continue
                     } else if session.terminal == "iterm2" {
                         itermSessions.append((session.session_id, session.terminal_session_id))
-                    } else if Int(session.terminal_session_id) != nil {
-                        monitorIdMap[session.terminal_session_id, default: []].append(session.session_id)
+                    } else if session.terminal == "ghostty" && session.terminal_session_id.contains("-") {
+                        ghosttyTerminalIds[session.terminal_session_id, default: []].append(session.session_id)
                     } else {
                         let ttyName = session.terminal_session_id.replacingOccurrences(
                             of: "/dev/", with: "")
@@ -487,16 +486,14 @@ class SessionReader: ObservableObject {
                     }
                 }
 
-                // --- Fallback: Ghostty monitor ID check (devcontainer tmux sessions) ---
-                // Only prune if we successfully enumerated at least one live Ghostty tab;
-                // an empty set likely means AX failure, not "no tabs open".
-                if !monitorIdMap.isEmpty {
-                    let liveIds = self.liveGhosttyMonitorIds()
+                // --- Ghostty terminal UUID liveness check ---
+                if !ghosttyTerminalIds.isEmpty {
+                    let liveIds = self.liveGhosttyTerminalIds()
                     NSLog("[ClaudeMonitor] Ghostty liveness: live=%@ checking=%@",
                           liveIds.sorted().joined(separator: ","),
-                          monitorIdMap.keys.sorted().joined(separator: ","))
+                          ghosttyTerminalIds.keys.sorted().joined(separator: ","))
                     if !liveIds.isEmpty {
-                        for (monitorId, sids) in monitorIdMap where !liveIds.contains(monitorId) {
+                        for (termId, sids) in ghosttyTerminalIds where !liveIds.contains(termId) {
                             deadSessionIds.formUnion(sids)
                         }
                     }
@@ -636,69 +633,24 @@ class SessionReader: ObservableObject {
         return false
     }
 
-    /// Return set of live Ghostty monitor IDs by inspecting window/tab titles via accessibility APIs.
-    /// Titles look like "tmux [N] ~/path" — extract N for each visible tab.
-    /// Must dispatch to main thread since AX APIs are unreliable from background queues.
-    private func liveGhosttyMonitorIds() -> Set<String> {
-        // Called from DispatchQueue.global — AX needs main thread
-        return DispatchQueue.main.sync {
-            guard
-                let ghosttyApp = NSRunningApplication.runningApplications(
-                    withBundleIdentifier: "com.mitchellh.ghostty"
-                ).first
-                    ?? NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Ghostty" })
-            else { return [] }
-
-            let appElement = AXUIElementCreateApplication(ghosttyApp.processIdentifier)
-            var windowsRef: CFTypeRef?
-            guard
-                AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-                let windows = windowsRef as? [AXUIElement]
-            else { return [] }
-
-            var ids: Set<String> = []
-            let pattern = try! NSRegularExpression(pattern: #"tmux \[(\d+)\]"#)
-
-            func extractMonitorId(from title: String) {
-                let range = NSRange(title.startIndex..., in: title)
-                if let match = pattern.firstMatch(in: title, range: range),
-                   let numRange = Range(match.range(at: 1), in: title) {
-                    ids.insert(String(title[numRange]))
-                }
-            }
-
-            for window in windows {
-                var titleRef: CFTypeRef?
-                AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
-                let windowTitle = titleRef as? String ?? ""
-                extractMonitorId(from: windowTitle)
-
-                // Check tabs
-                var childrenRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-                   let children = childrenRef as? [AXUIElement] {
-                    for child in children {
-                        var roleRef: CFTypeRef?
-                        AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleRef)
-                        if (roleRef as? String) == "AXTabGroup" {
-                            var tabsRef: CFTypeRef?
-                            if AXUIElementCopyAttributeValue(child, kAXChildrenAttribute as CFString, &tabsRef) == .success,
-                               let tabs = tabsRef as? [AXUIElement] {
-                                for tab in tabs {
-                                    var tabTitleRef: CFTypeRef?
-                                    AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &tabTitleRef)
-                                    if let tabTitle = tabTitleRef as? String {
-                                        extractMonitorId(from: tabTitle)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            return ids
-        }
+    /// Return set of live Ghostty terminal UUIDs by enumerating all windows/tabs via AppleScript.
+    private func liveGhosttyTerminalIds() -> Set<String> {
+        let script = """
+            tell application "Ghostty"
+                set output to ""
+                repeat with w in every window
+                    repeat with t in every tab of w
+                        set output to output & id of focused terminal of t & linefeed
+                    end repeat
+                end repeat
+                return output
+            end tell
+            """
+        guard let appleScript = NSAppleScript(source: script) else { return [] }
+        var error: NSDictionary?
+        let result = appleScript.executeAndReturnError(&error)
+        guard error == nil, let output = result.stringValue else { return [] }
+        return Set(output.split(separator: "\n").map(String.init).filter { !$0.isEmpty })
     }
 
     /// Run a shell command and return stdout, or nil on failure
@@ -728,6 +680,39 @@ class SessionReader: ObservableObject {
             try? fm.removeItem(atPath: "\(self.sessionsDir)/\(id).context")
             try? fm.removeItem(atPath: "\(self.sessionsDir)/\(id).model")
             self.endedSessionIds.insert(id)
+        }
+    }
+
+    /// Relink a Ghostty session to the currently focused terminal tab.
+    func relinkGhosttySession(_ session: SessionInfo) {
+        let script = "tell application \"Ghostty\" to return id of focused terminal of selected tab of front window"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let appleScript = NSAppleScript(source: script) else { return }
+            var error: NSDictionary?
+            let result = appleScript.executeAndReturnError(&error)
+            guard error == nil, let termId = result.stringValue, !termId.isEmpty else { return }
+
+            DispatchQueue.main.async {
+                guard let self = self,
+                      let idx = self.sessions.firstIndex(where: { $0.session_id == session.session_id })
+                else { return }
+                self.sessions[idx].terminal_session_id = termId
+
+                // Persist to session JSON file
+                self.ioQueue.async {
+                    let path = "\(self.sessionsDir)/\(session.session_id).json"
+                    guard let data = FileManager.default.contents(atPath: path),
+                          var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    else { return }
+                    json["terminal_session_id"] = termId
+                    if let updated = try? JSONSerialization.data(withJSONObject: json),
+                       let str = String(data: updated, encoding: .utf8) {
+                        let tmp = path + ".tmp"
+                        try? str.write(toFile: tmp, atomically: true, encoding: .utf8)
+                        try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+                    }
+                }
+            }
         }
     }
 
@@ -1008,33 +993,20 @@ class ActiveSessionTracker: ObservableObject {
     }
 
     private func detectGhosttySession(app: NSRunningApplication, sessions: [SessionInfo]) {
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedRef) == .success,
-              let focusedWindow = focusedRef else {
-            DispatchQueue.main.async { self.activeSessionId = nil }
-            return
-        }
-        let window = focusedWindow as! AXUIElement
-
-        var titleRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
-        let title = titleRef as? String ?? ""
-
-        var docRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &docRef)
-        let doc = docRef as? String ?? ""
-
-        var bestId: String? = nil
-        var bestScore = 0
-        for session in sessions {
-            let score = scoreGhosttyWindow(title: title, doc: doc, cwd: session.cwd, sessionId: session.terminal_session_id)
-            if score > bestScore {
-                bestScore = score
-                bestId = session.session_id
+        let script = "tell application \"Ghostty\" to return id of focused terminal of selected tab of front window"
+        backgroundQueue.async { [weak self] in
+            guard let appleScript = NSAppleScript(source: script) else { return }
+            var error: NSDictionary?
+            let result = appleScript.executeAndReturnError(&error)
+            guard error == nil, let termId = result.stringValue else {
+                DispatchQueue.main.async { self?.activeSessionId = nil }
+                return
             }
+            let matched = sessions.first { session in
+                session.terminal == "ghostty" && session.terminal_session_id == termId
+            }
+            DispatchQueue.main.async { self?.activeSessionId = matched?.session_id }
         }
-        DispatchQueue.main.async { self.activeSessionId = bestId }
     }
 
     private func detectITerm2Session(sessions: [SessionInfo]) {
@@ -1089,7 +1061,7 @@ func switchToSession(_ session: SessionInfo) {
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
     } else if session.terminal == "ghostty" {
-        switchToGhostty(cwd: session.cwd, ttyPath: session.terminal_session_id, sessionId: session.terminal_session_id)
+        switchToGhostty(sessionId: session.terminal_session_id)
     } else if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
         switchToTerminal(ttyPath: session.terminal_session_id)
     } else {
@@ -1157,122 +1129,24 @@ func switchToTerminal(ttyPath: String) {
 }
 
 
-func switchToGhostty(cwd: String, ttyPath: String, sessionId: String = "") {
-    let basename = (cwd as NSString).lastPathComponent
-
-    guard
-        let ghosttyApp = NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.mitchellh.ghostty"
-        ).first
-            ?? NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "Ghostty" }
-            )
-    else { return }
-
-    let appElement = AXUIElementCreateApplication(ghosttyApp.processIdentifier)
-    let opts = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
-    _ = AXIsProcessTrustedWithOptions(opts)
-
-    var windowsRef: CFTypeRef?
-    guard
-        AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
-            == .success,
-        let windows = windowsRef as? [AXUIElement]
-    else {
-        ghosttyApp.activate()
-        return
-    }
-
-    // Helper: find the tab group and tabs for a window
-    func getTabs(_ window: AXUIElement) -> [AXUIElement]? {
-        var childrenRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement] else { return nil }
-        for child in children {
-            var roleRef: CFTypeRef?
-            AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleRef)
-            if (roleRef as? String) == "AXTabGroup" {
-                var tabsRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(child, kAXChildrenAttribute as CFString, &tabsRef) == .success,
-                   let tabs = tabsRef as? [AXUIElement] { return tabs }
-            }
-        }
-        return nil
-    }
-
-    // Helper: read AXDocument from a window (file URL of CWD, reliable for direct Claude windows)
-    func getDocument(_ window: AXUIElement) -> String {
-        var docRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &docRef) == .success,
-              let doc = docRef as? String else { return "" }
-        return doc
-    }
-
-    struct Candidate {
-        let window: AXUIElement
-        let tab: AXUIElement?
-        let title: String
-        let score: Int
-    }
-
-    var candidates: [Candidate] = []
-
-    for window in windows {
-        var titleRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
-        let windowTitle = titleRef as? String ?? ""
-        let document = getDocument(window)
-
-        let windowScore = scoreGhosttyWindow(title: windowTitle, doc: document, cwd: cwd, sessionId: sessionId)
-
-        // For multi-tab windows, score each tab individually too
-        if let tabs = getTabs(window), tabs.count > 1 {
-            var hadTabMatch = false
-            for tab in tabs {
-                var tabTitleRef: CFTypeRef?
-                AXUIElementCopyAttributeValue(tab, kAXTitleAttribute as CFString, &tabTitleRef)
-                let tabTitle = tabTitleRef as? String ?? ""
-                guard !tabTitle.isEmpty else { continue }
-                let s = scoreGhosttyWindow(title: tabTitle, doc: document, cwd: cwd, sessionId: sessionId)
-                if s > 0 {
-                    candidates.append(Candidate(window: window, tab: tab, title: tabTitle, score: s))
-                    hadTabMatch = true
-                }
-            }
-            if !hadTabMatch && windowScore > 0 {
-                candidates.append(Candidate(window: window, tab: nil, title: windowTitle, score: windowScore))
-            }
-        } else {
-            // Single-tab window
-            if windowScore > 0 {
-                candidates.append(Candidate(window: window, tab: nil, title: windowTitle, score: windowScore))
-            }
+func switchToGhostty(sessionId: String) {
+    if sessionId.contains("-") {
+        // UUID — focus directly via AppleScript
+        let script = "tell application \"Ghostty\" to focus terminal id \"\(sessionId)\""
+        if let appleScript = NSAppleScript(source: script) {
+            var error: NSDictionary?
+            appleScript.executeAndReturnError(&error)
+            if error == nil { return }
         }
     }
-
-    // Sort by score descending
-    candidates.sort { $0.score > $1.score }
-    NSLog("[ClaudeMonitor] switchToGhostty: %d candidates for cwd=%@ basename=%@", candidates.count, cwd, basename)
-    for c in candidates {
-        NSLog("[ClaudeMonitor]   candidate: \"\(c.title)\" score=\(c.score)")
-    }
-
-    if let best = candidates.first {
-        NSLog("[ClaudeMonitor] switchToGhostty: matched \"\(best.title)\" (score=\(best.score), doc-based=\(best.score >= 30)) for project \(basename)")
-        if let tab = best.tab {
-            AXUIElementPerformAction(tab, kAXPressAction as CFString)
-        }
-        AXUIElementPerformAction(best.window, kAXRaiseAction as CFString)
-    } else {
-        NSLog("[ClaudeMonitor] switchToGhostty: no match for \(basename)")
-    }
-    ghosttyApp.activate()
+    // Fallback: just activate the app
+    NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first?.activate()
 }
 
 func switchByTerminalCwd(cwd: String) {
     // Fallback: detect which terminal is running and activate it
-    // Prefer Ghostty (with CWD matching) over a plain activate
     if NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first != nil {
-        switchToGhostty(cwd: cwd, ttyPath: "")
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first?.activate()
         return
     }
     if NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.googlecode.iterm2" }) {
@@ -1330,7 +1204,6 @@ struct SessionRowView: View {
     var teamInfo: TeamInfo? = nil
     var isActive: Bool = false
     var disambiguationSuffix: String? = nil
-    var onDelete: (() -> Void)? = nil
     @State private var isHovered = false
     @State private var badgeScale: CGFloat = 1.0
 
@@ -1448,20 +1321,6 @@ struct SessionRowView: View {
                                 .fill(session.statusColor.opacity(session.isStale ? 0.08 : 0.2))
                         )
                         .fixedSize()
-                        .overlay(alignment: .leading) {
-                            if onDelete != nil && isHovered {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.4))
-                                    .overlay(
-                                        FirstMouseClickArea {
-                                            onDelete?()
-                                        }
-                                    )
-                                    .frame(width: 20, height: 20)
-                                    .offset(x: -24)
-                            }
-                        }
 
                     if let pct = session.context_pct {
                         Text("\(pct)%")
@@ -1750,18 +1609,6 @@ struct MonitorContentView: View {
         for (_, group) in byProject {
             guard group.count > 1 else { continue }
 
-            // If all sessions have simple numeric terminal_session_ids, use "[N]" suffix
-            let allNumeric = group.allSatisfy { s in
-                !s.terminal_session_id.isEmpty
-                && s.terminal_session_id.allSatisfy(\.isWholeNumber)
-            }
-            if allNumeric {
-                for s in group {
-                    result[s.session_id] = "[\(s.terminal_session_id)]"
-                }
-                continue
-            }
-
             // Split each cwd into path components (drop the project basename at the end)
             let paths: [(SessionInfo, [String])] = group.map { s in
                 var comps = s.cwd.split(separator: "/").map(String.init)
@@ -1815,8 +1662,7 @@ struct MonitorContentView: View {
                                 session: session,
                                 teamInfo: teamReader.teamInfo(for: session),
                                 isActive: session.session_id == activeTracker.activeSessionId,
-                                disambiguationSuffix: disambigMap[session.session_id],
-                                onDelete: { reader.deleteSession(session.session_id) }
+                                disambiguationSuffix: disambigMap[session.session_id]
                             )
                             .overlay(
                                 FirstMouseClickArea {
@@ -1824,6 +1670,16 @@ struct MonitorContentView: View {
                                     activeTracker.activeSessionId = session.session_id
                                 }
                             )
+                            .contextMenu {
+                                if session.terminal == "ghostty" {
+                                    Button("Relink to Focused Tab") {
+                                        reader.relinkGhosttySession(session)
+                                    }
+                                }
+                                Button("Delete Session") {
+                                    reader.deleteSession(session.session_id)
+                                }
+                            }
                             if session.id != reader.sessions.last?.id {
                                 Divider()
                                     .background(Color.white.opacity(0.05))

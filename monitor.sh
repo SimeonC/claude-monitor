@@ -199,8 +199,9 @@ detect_terminal() {
     done
 
     if [ -n "${GHOSTTY_RESOURCES_DIR:-}" ]; then
-        if [ -n "${CLAUDE_MONITOR_ID:-}" ]; then
-            echo "ghostty|$CLAUDE_MONITOR_ID"
+        term_id=$(osascript -e 'tell application "Ghostty" to return id of focused terminal of selected tab of front window' 2>/dev/null)
+        if [ -n "$term_id" ]; then
+            echo "ghostty|$term_id"
         else
             echo "ghostty|/dev/$tty_name"
         fi
