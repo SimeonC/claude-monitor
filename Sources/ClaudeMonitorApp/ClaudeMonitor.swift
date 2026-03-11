@@ -693,7 +693,14 @@ class SessionReader: ObservableObject {
             guard let appleScript = NSAppleScript(source: script) else { return }
             var error: NSDictionary?
             let result = appleScript.executeAndReturnError(&error)
-            guard error == nil, let termId = result.stringValue, !termId.isEmpty else { return }
+            if let error = error {
+                debugLog("relink: AppleScript error: \(error)")
+                return
+            }
+            guard let termId = result.stringValue, !termId.isEmpty else {
+                debugLog("relink: AppleScript returned empty/nil result: \(result)")
+                return
+            }
             let sessionId = session.session_id
 
             // Persist to disk first (on ioQueue), then update in-memory model on main.
@@ -702,13 +709,17 @@ class SessionReader: ObservableObject {
                 let path = "\(self.sessionsDir)/\(sessionId).json"
                 guard let data = FileManager.default.contents(atPath: path),
                       var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else { return }
+                else {
+                    debugLog("relink: failed to read/parse session file at \(path)")
+                    return
+                }
                 json["terminal_session_id"] = termId
                 if let updated = try? JSONSerialization.data(withJSONObject: json),
                    let str = String(data: updated, encoding: .utf8) {
-                    let tmp = path + ".tmp"
-                    try? str.write(toFile: tmp, atomically: true, encoding: .utf8)
-                    try? FileManager.default.moveItem(atPath: tmp, toPath: path)
+                    try? str.write(toFile: path, atomically: true, encoding: .utf8)
+                    debugLog("relink: persisted terminal_session_id=\(termId) to disk")
+                } else {
+                    debugLog("relink: failed to serialize updated JSON")
                 }
                 DispatchQueue.main.async {
                     if let idx = self.sessions.firstIndex(where: { $0.session_id == sessionId }) {
@@ -1417,12 +1428,14 @@ struct SessionRowView: View {
 
 struct RefreshButton: View {
     var sessionReader: SessionReader?
+    var shortcutManager: ShortcutManager?
     @State private var showCheck = false
 
     var body: some View {
         Button {
             sessionReader?.scanProjects()
             sessionReader?.readSessions()
+            shortcutManager?.recheckAccessibility()
             showCheck = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 showCheck = false
@@ -1623,7 +1636,7 @@ struct HeaderBar: View {
 
                 ShortcutButton(shortcutManager: shortcutManager)
                     .fixedSize()
-                RefreshButton(sessionReader: sessionReader)
+                RefreshButton(sessionReader: sessionReader, shortcutManager: shortcutManager)
                     .fixedSize()
             }
             .layoutPriority(1)
@@ -2094,6 +2107,12 @@ class ShortcutManager: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.ensureAccessibilityAndInstall()
         }
+    }
+
+    /// Re-check accessibility permission and install monitors if now granted.
+    func recheckAccessibility() {
+        guard globalMonitor == nil else { return }  // already installed
+        ensureAccessibilityAndInstall()
     }
 
     /// Request accessibility access (prompts user if needed) and install monitors.
