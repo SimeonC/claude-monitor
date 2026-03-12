@@ -165,6 +165,14 @@ class SessionReader: ObservableObject {
     /// Serial queue for all disk I/O and state mutations (keeps main thread free for UI)
     private let ioQueue = DispatchQueue(label: "com.claudemonitor.sessionio", qos: .userInitiated)
 
+    /// TTY → Ghostty UUID mapping for click-to-switch (loaded from tty_map.json)
+    private(set) var ttyMap: [String: String] = [:]
+
+    private let monitorDir: String = {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/.claude/monitor"
+    }()
+
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return "\(home)/.claude/monitor/sessions"
@@ -451,9 +459,10 @@ class SessionReader: ObservableObject {
                 guard let self = self else { return }
                 var deadSessionIds: Set<String> = []
 
-                var ttyMap: [String: [String]] = [:]
-                var ghosttyTerminalIds: [String: [String]] = [:]
+                var ttyCheckMap: [String: [String]] = [:]
+                var ghosttyUUIDMap: [String: [String]] = [:]  // backward compat: old UUID-based sessions
                 var itermSessions: [(id: String, termSid: String)] = []
+                let savedTtyMap = self.ttyMap  // snapshot for Ghostty UUID liveness
 
                 for (session, _) in currentSessions {
                     if session.status == "dead" { continue }
@@ -467,7 +476,8 @@ class SessionReader: ObservableObject {
                             deadSessionIds.insert(session.session_id)
                             continue
                         }
-                        // Ghostty UUID sessions (contain "-") need AppleScript liveness check
+                        // Backward compat: old Ghostty UUID sessions need AppleScript liveness
+                        // New TTY sessions: skip JSONL-fresh sessions (TTY check below handles stale)
                         if !session.terminal_session_id.contains("-") {
                             continue
                         }
@@ -478,27 +488,35 @@ class SessionReader: ObservableObject {
                     } else if session.terminal == "iterm2" {
                         itermSessions.append((session.session_id, session.terminal_session_id))
                     } else if session.terminal == "ghostty" && session.terminal_session_id.contains("-") {
-                        ghosttyTerminalIds[session.terminal_session_id, default: []].append(session.session_id)
+                        // Backward compat: old sessions with UUID directly in terminal_session_id
+                        ghosttyUUIDMap[session.terminal_session_id, default: []].append(session.session_id)
                     } else {
                         let ttyName = session.terminal_session_id.replacingOccurrences(
                             of: "/dev/", with: "")
-                        ttyMap[ttyName, default: []].append(session.session_id)
+                        ttyCheckMap[ttyName, default: []].append(session.session_id)
                     }
                 }
 
-                // --- Fallback: Terminal/Ghostty TTY check ---
-                if !ttyMap.isEmpty {
-                    let ttys = ttyMap.keys.joined(separator: " ")
+                // --- TTY liveness check (Terminal.app, Ghostty TTY sessions) ---
+                if !ttyCheckMap.isEmpty {
+                    let ttys = ttyCheckMap.keys.joined(separator: " ")
                     let script =
                         "for tty in \(ttys); do ps -t \"$tty\" -o comm= 2>/dev/null | grep -q claude || echo \"$tty\"; done"
                     if let output = self.runShell(script) {
                         for tty in output.split(separator: "\n").map(String.init) {
-                            if let sids = ttyMap[tty] { deadSessionIds.formUnion(sids) }
+                            if let sids = ttyCheckMap[tty] { deadSessionIds.formUnion(sids) }
                         }
                     }
                 }
 
-                // --- Ghostty terminal UUID liveness check ---
+                // --- Ghostty UUID liveness check (for TTY sessions via ttyMap + backward compat) ---
+                // Collect UUIDs to check: from ttyMap for active Ghostty TTY sessions + old UUID sessions
+                var ghosttyTerminalIds: [String: [String]] = ghosttyUUIDMap
+                for (tty, sids) in ttyCheckMap {
+                    if let uuid = savedTtyMap["/dev/\(tty)"] ?? savedTtyMap[tty] {
+                        ghosttyTerminalIds[uuid, default: []].append(contentsOf: sids)
+                    }
+                }
                 if !ghosttyTerminalIds.isEmpty {
                     let liveIds = self.liveGhosttyTerminalIds()
                     NSLog("[ClaudeMonitor] Ghostty liveness: live=%@ checking=%@",
@@ -696,6 +714,7 @@ class SessionReader: ObservableObject {
     }
 
     /// Relink a Ghostty session to the currently focused terminal tab.
+    /// Updates tty_map.json (TTY → UUID mapping), not the session file.
     func relinkGhosttySession(_ session: SessionInfo) {
         let script = "tell application \"Ghostty\" to return id of focused terminal of selected tab of front window"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -707,34 +726,28 @@ class SessionReader: ObservableObject {
                 debugLog("relink: AppleScript error: \(error)")
                 return
             }
-            guard let termId = result.stringValue, !termId.isEmpty else {
+            guard let uuid = result.stringValue, !uuid.isEmpty else {
                 debugLog("relink: AppleScript returned empty/nil result: \(result)")
                 return
             }
-            let sessionId = session.session_id
+            let ttyKey = session.terminal_session_id
+            guard !ttyKey.isEmpty else {
+                debugLog("relink: session has no terminal_session_id (TTY)")
+                return
+            }
 
-            // Persist to disk first (on ioQueue), then update in-memory model on main.
-            // This prevents a concurrent readSessions() from overwriting the change.
             self.ioQueue.async {
-                let path = "\(self.sessionsDir)/\(sessionId).json"
-                guard let data = FileManager.default.contents(atPath: path),
-                      var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else {
-                    debugLog("relink: failed to read/parse session file at \(path)")
-                    return
-                }
-                json["terminal_session_id"] = termId
-                if let updated = try? JSONSerialization.data(withJSONObject: json),
-                   let str = String(data: updated, encoding: .utf8) {
-                    try? str.write(toFile: path, atomically: true, encoding: .utf8)
-                    debugLog("relink: persisted terminal_session_id=\(termId) to disk")
+                // Update tty_map.json
+                let mapPath = "\(self.monitorDir)/tty_map.json"
+                var map = self.ttyMap
+                map[ttyKey] = uuid
+                if let data = try? JSONSerialization.data(withJSONObject: map),
+                   let str = String(data: data, encoding: .utf8) {
+                    try? str.write(toFile: mapPath, atomically: true, encoding: .utf8)
+                    self.ttyMap = map
+                    debugLog("relink: mapped \(ttyKey) → \(uuid) in tty_map.json")
                 } else {
-                    debugLog("relink: failed to serialize updated JSON")
-                }
-                DispatchQueue.main.async {
-                    if let idx = self.sessions.firstIndex(where: { $0.session_id == sessionId }) {
-                        self.sessions[idx].terminal_session_id = termId
-                    }
+                    debugLog("relink: failed to serialize tty_map.json")
                 }
             }
         }
@@ -835,6 +848,13 @@ class SessionReader: ObservableObject {
         let disappeared = self.previousSessionFileIds.subtracting(currentFileIds)
         self.endedSessionIds.formUnion(disappeared)
         self.previousSessionFileIds = currentFileIds
+
+        // Load TTY → Ghostty UUID mapping
+        let ttyMapPath = "\(monitorDir)/tty_map.json"
+        if let ttyMapData = fm.contents(atPath: ttyMapPath),
+           let decoded = try? JSONSerialization.jsonObject(with: ttyMapData) as? [String: String] {
+            self.ttyMap = decoded
+        }
 
         // Recovery: for derivedData entries with active JSONL but no session file,
         // create in-memory SessionInfo (monitor restart recovery / session file not yet written).
@@ -1036,19 +1056,30 @@ class ActiveSessionTracker: ObservableObject {
     private func detectGhosttySession(app: NSRunningApplication, sessions: [SessionInfo]) {
         let script = "tell application \"Ghostty\" to return id of focused terminal of selected tab of front window"
         backgroundQueue.async { [weak self] in
+            guard let self = self else { return }
             guard let appleScript = NSAppleScript(source: script) else { return }
             var error: NSDictionary?
             let result = appleScript.executeAndReturnError(&error)
-            guard error == nil, let termId = result.stringValue else {
-                DispatchQueue.main.async { self?.activeSessionId = nil }
+            guard error == nil, let focusedUUID = result.stringValue else {
+                DispatchQueue.main.async { self.activeSessionId = nil }
                 return
             }
             let ghosttySessions = sessions.filter { $0.terminal == "ghostty" }
-            debugLog("detectGhostty: focused=\(termId) ghosttySessions=\(ghosttySessions.map { "\($0.session_id)=\($0.terminal_session_id)" }.joined(separator: ", "))")
-            let matched = sessions.first { session in
-                session.terminal == "ghostty" && session.terminal_session_id == termId
+            debugLog("detectGhostty: focused=\(focusedUUID) ghosttySessions=\(ghosttySessions.map { "\($0.session_id)=\($0.terminal_session_id)" }.joined(separator: ", "))")
+
+            // Reverse lookup: find which TTY maps to this UUID via ttyMap
+            let ttyMap = self.sessionReader?.ttyMap ?? [:]
+            let matchedTTY = ttyMap.first { $0.value == focusedUUID }?.key
+
+            var matched: SessionInfo?
+            if let tty = matchedTTY {
+                matched = sessions.first { $0.terminal == "ghostty" && $0.terminal_session_id == tty }
             }
-            DispatchQueue.main.async { self?.activeSessionId = matched?.session_id }
+            // Backward compat: direct UUID match for old sessions
+            if matched == nil {
+                matched = sessions.first { $0.terminal == "ghostty" && $0.terminal_session_id == focusedUUID }
+            }
+            DispatchQueue.main.async { self.activeSessionId = matched?.session_id }
         }
     }
 
@@ -1115,19 +1146,18 @@ func debugLog(_ message: String) {
 
 // MARK: - Terminal Switcher
 
-func switchToSession(_ session: SessionInfo) {
+func switchToSession(_ session: SessionInfo, ttyMap: [String: String] = [:]) {
     debugLog("switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project) sid=\(session.session_id)")
     if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
         switchToITerm2(sessionId: session.terminal_session_id)
     } else if session.terminal == "ghostty" {
-        switchToGhostty(sessionId: session.terminal_session_id)
+        switchToGhostty(session: session, ttyMap: ttyMap)
     } else if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
         switchToTerminal(ttyPath: session.terminal_session_id)
     } else {
         NSLog("[ClaudeMonitor] falling back to cwd switch (no terminal info)")
         switchByTerminalCwd(cwd: session.cwd)
     }
-
 }
 
 func switchToITerm2(sessionId: String) {
@@ -1188,11 +1218,21 @@ func switchToTerminal(ttyPath: String) {
 }
 
 
-func switchToGhostty(sessionId: String) {
-    debugLog("switchToGhostty: sessionId=\(sessionId)")
-    if sessionId.contains("-") {
-        // UUID — focus directly via AppleScript
-        let script = "tell application \"Ghostty\" to focus terminal id \"\(sessionId)\""
+func switchToGhostty(session: SessionInfo, ttyMap: [String: String]) {
+    let tty = session.terminal_session_id
+    debugLog("switchToGhostty: tty=\(tty)")
+
+    // Resolve UUID: forward lookup through ttyMap, or direct if already a UUID (backward compat)
+    var uuid: String?
+    if let mapped = ttyMap[tty] {
+        uuid = mapped
+    } else if tty.contains("-") {
+        // Old session with UUID directly in terminal_session_id
+        uuid = tty
+    }
+
+    if let uuid = uuid {
+        let script = "tell application \"Ghostty\" to focus terminal id \"\(uuid)\""
         debugLog("switchToGhostty: running AppleScript: \(script)")
         if let appleScript = NSAppleScript(source: script) {
             var error: NSDictionary?
@@ -1736,7 +1776,7 @@ struct MonitorContentView: View {
                             .overlay(
                                 FirstMouseClickArea(
                                     action: {
-                                        switchToSession(session)
+                                        switchToSession(session, ttyMap: reader.ttyMap)
                                         activeTracker.activeSessionId = session.session_id
                                     },
                                     contextMenuBuilder: { event in
@@ -2276,13 +2316,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let candidate = sessions[idx]
             if useAttention {
                 if candidate.status == "attention" {
-                    switchToSession(candidate)
+                    switchToSession(candidate, ttyMap: reader.ttyMap)
                     currentSessionId = candidate.session_id
                     activeTracker.activeSessionId = candidate.session_id
                     return
                 }
             } else {
-                switchToSession(candidate)
+                switchToSession(candidate, ttyMap: reader.ttyMap)
                 currentSessionId = candidate.session_id
                 activeTracker.activeSessionId = candidate.session_id
                 return

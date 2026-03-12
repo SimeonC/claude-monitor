@@ -177,49 +177,98 @@ if [ "$IS_SUBAGENT" = "true" ]; then
 fi
 
 # --- Detect terminal + session ID for click-to-switch ---
+# Returns "app|tty_path" — TTY is always the identity (stable across restarts).
+# Ghostty UUID mapping lives in tty_map.json (see seed_tty_map).
 detect_terminal() {
-    local term_app=""
-    local term_session_id=""
-
-    # Pre-captured Ghostty UUID (e.g. forwarded into devcontainers via --remote-env)
-    if [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then
-        echo "ghostty|$GHOSTTY_TERMINAL_UUID"
-        return
-    fi
-
-    if [ -n "${ITERM_SESSION_ID:-}" ]; then
-        echo "iterm2|$ITERM_SESSION_ID"
-        return
-    fi
-
-    # Walk up process tree to find a parent with a real TTY
+    local tty_id=""
     local pid=$$
-    local tty_name=""
     for _ in 1 2 3 4 5; do
         pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
         [ -z "$pid" ] || [ "$pid" = "1" ] && break
-        tty_name=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
-        if [ -n "$tty_name" ] && [ "$tty_name" != "??" ]; then
-            break
+        local t
+        t=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [ -n "$t" ] && [ "$t" != "??" ]; then
+            tty_id="/dev/$t"; break
         fi
     done
+    [ -n "${DEVCONTAINER:-}" ] && [ -n "$tty_id" ] && tty_id="$(hostname):$tty_id"
 
-    if [ -n "${GHOSTTY_RESOURCES_DIR:-}" ]; then
-        term_id=$(osascript -e 'tell application "Ghostty" to return id of focused terminal of selected tab of front window' 2>/dev/null)
-        if [ -n "$term_id" ]; then
-            echo "ghostty|$term_id"
-        else
-            echo "ghostty|/dev/$tty_name"
+    if [ -n "${ITERM_SESSION_ID:-}" ]; then echo "iterm2|$tty_id"
+    elif [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then echo "ghostty|$tty_id"
+    elif [ -n "$tty_id" ]; then echo "terminal|$tty_id"
+    else echo "|"
+    fi
+}
+
+# --- Seed tty_map.json: TTY → Ghostty UUID mapping for click-to-switch ---
+# Called at SessionStart. Enumerates Ghostty terminals to find which UUID owns this TTY.
+seed_tty_map() {
+    [ "$TERM_APP" = "ghostty" ] || return 0
+    [ -n "$TERM_SID" ] || return 0
+    local map_file="$MONITOR_DIR/tty_map.json"
+
+    # Don't overwrite existing mapping for this TTY
+    if [ -f "$map_file" ] && jq -e --arg tty "$TERM_SID" 'has($tty)' "$map_file" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local uuid=""
+    local project_base
+    project_base=$(basename "${CWD:-}")
+
+    # Enumerate all Ghostty terminals
+    if [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then
+        local enum
+        enum=$(osascript -e '
+            tell application "Ghostty"
+                set output to ""
+                repeat with w in every window
+                    repeat with t in every tab of w
+                        set term to focused terminal of t
+                        set output to output & id of term & tab character & working directory of term & linefeed
+                    end repeat
+                end repeat
+                return output
+            end tell' 2>/dev/null)
+
+        if [ -n "$enum" ]; then
+            # Load existing map to check which UUIDs are already mapped
+            local existing="{}"
+            [ -f "$map_file" ] && existing=$(cat "$map_file" 2>/dev/null || echo "{}")
+            local mapped_uuids
+            mapped_uuids=$(echo "$existing" | jq -r '[.[]] | join("\n")' 2>/dev/null)
+
+            # Try exact CWD match first, then basename match
+            local candidate="" fallback=""
+            while IFS=$'\t' read -r tid tcwd; do
+                [ -n "$tid" ] || continue
+                local match=false
+                if [ "$tcwd" = "$CWD" ]; then
+                    match=true
+                elif [ -n "$project_base" ] && [ "$(basename "$tcwd")" = "$project_base" ]; then
+                    match=true
+                fi
+                $match || continue
+                # Prefer UUIDs not already in map
+                if ! echo "$mapped_uuids" | grep -qF "$tid"; then
+                    candidate="$tid"; break
+                fi
+                [ -z "$fallback" ] && fallback="$tid"
+            done <<< "$enum"
+            uuid="${candidate:-$fallback}"
         fi
-        return
     fi
 
-    if [ -n "$tty_name" ] && [ "$tty_name" != "??" ]; then
-        term_app="terminal"
-        term_session_id="/dev/$tty_name"
-    fi
+    # Fallbacks
+    [ -z "$uuid" ] && [ -n "${GHOSTTY_TERMINAL_UUID:-}" ] && uuid="$GHOSTTY_TERMINAL_UUID"
+    [ -z "$uuid" ] && uuid=$(osascript -e 'tell application "Ghostty" to return id of focused terminal of selected tab of front window' 2>/dev/null)
+    [ -n "$uuid" ] || return 0
 
-    echo "$term_app|$term_session_id"
+    # Atomic update
+    local existing="{}"
+    [ -f "$map_file" ] && existing=$(cat "$map_file" 2>/dev/null || echo "{}")
+    echo "$existing" | jq --arg tty "$TERM_SID" --arg uuid "$uuid" \
+        '.[$tty] = $uuid' > "${map_file}.tmp" && mv "${map_file}.tmp" "$map_file"
 }
 
 # --- Detect terminal once for all events ---
@@ -283,6 +332,7 @@ set_working() {
 case "$EVENT" in
     SessionStart)
         cleanup_same_terminal
+        seed_tty_map
         # Detect --dangerously-skip-permissions once at session start.
         # Fallback: devcontainer sessions always run with skip-permissions (injected by claude.fish).
         if detect_skip_permissions || [ -n "${DEVCONTAINER:-}" ]; then
