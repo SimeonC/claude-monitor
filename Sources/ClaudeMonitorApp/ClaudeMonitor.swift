@@ -7,6 +7,7 @@ import ClaudeMonitorCore
 
 class TeamReader: ObservableObject {
     @Published var teamsBySession: [String: TeamInfo] = [:]
+    @Published var leadSessionByTeamName: [String: String] = [:]
     private var watcher: DirectoryWatcher?
 
     private let teamsDir: String = {
@@ -34,6 +35,7 @@ class TeamReader: ObservableObject {
         }
 
         var result: [String: TeamInfo] = [:]
+        var nameMap: [String: String] = [:]
 
         for teamDir in teamDirs {
             let configPath = "\(teamsDir)/\(teamDir)/config.json"
@@ -41,6 +43,8 @@ class TeamReader: ObservableObject {
                 let config = try? JSONDecoder().decode(TeamConfig.self, from: data),
                 let leadSessionId = config.leadSessionId, !leadSessionId.isEmpty
             else { continue }
+
+            nameMap[teamDir] = leadSessionId
 
             let members = config.members ?? []
             let activeCount = members.filter { ($0.isActive ?? false) }.count
@@ -69,6 +73,7 @@ class TeamReader: ObservableObject {
 
         DispatchQueue.main.async {
             self.teamsBySession = result
+            self.leadSessionByTeamName = nameMap
         }
     }
 
@@ -167,6 +172,12 @@ class SessionReader: ObservableObject {
 
     /// TTY → Ghostty UUID mapping for click-to-switch (loaded from tty_map.json)
     private(set) var ttyMap: [String: String] = [:]
+
+    /// Team agent session IDs → team name (populated from JSONL scanning)
+    private var teamAgentSessions: [String: String] = [:]
+
+    /// Reference to TeamReader for looking up team lead session IDs
+    weak var teamReader: TeamReader?
 
     private let monitorDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -277,24 +288,25 @@ class SessionReader: ObservableObject {
     /// Read the tail of a JSONL file to extract cwd, latest user prompt, timestamp, and whether it's a subagent.
     /// Reads up to 64KB to ensure large assistant responses don't push user messages out of the window.
     private func readJSONLTail(path: String) -> (
-        cwd: String, prompt: String, timestamp: String?, isSubagent: Bool
+        cwd: String, prompt: String, timestamp: String?, isSubagent: Bool, teamName: String?
     ) {
         guard let fileHandle = FileHandle(forReadingAtPath: path) else {
-            return ("", "", nil, false)
+            return ("", "", nil, false, nil)
         }
         defer { fileHandle.closeFile() }
 
         let fileSize = fileHandle.seekToEndOfFile()
-        guard fileSize > 0 else { return ("", "", nil, false) }
+        guard fileSize > 0 else { return ("", "", nil, false, nil) }
         let readSize: UInt64 = min(fileSize, 65536)
         fileHandle.seek(toFileOffset: fileSize - readSize)
         let data = fileHandle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return ("", "", nil, false) }
+        guard let text = String(data: data, encoding: .utf8) else { return ("", "", nil, false, nil) }
 
         let lines = text.components(separatedBy: "\n")
         var cwd = ""
         var timestamp: String? = nil
         var isSubagent = false
+        var teamName: String? = nil
 
         for line in lines {
             guard !line.isEmpty,
@@ -310,6 +322,9 @@ class SessionReader: ObservableObject {
             }
             if json["agentName"] != nil {
                 isSubagent = true
+            }
+            if let tn = json["teamName"] as? String, !tn.isEmpty {
+                teamName = tn
             }
         }
 
@@ -336,7 +351,7 @@ class SessionReader: ObservableObject {
             }
         }
 
-        return (cwd, prompt, timestamp, isSubagent)
+        return (cwd, prompt, timestamp, isSubagent, teamName)
     }
 
     /// Find the JSONL file path for a session ID by scanning project directories.
@@ -363,6 +378,7 @@ class SessionReader: ObservableObject {
             let twoMinAgo = now.addingTimeInterval(-120)
 
             var newDerived: [String: DerivedSessionData] = [:]
+            var newTeamAgents: [String: String] = [:]
 
             for projectDir in projectDirs {
                 let projectPath = "\(self.projectsDir)/\(projectDir)"
@@ -382,7 +398,12 @@ class SessionReader: ObservableObject {
                     let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
                     // Read last ~4KB to extract info
-                    let (cwd, lastPrompt, _, isSubagent) = self.readJSONLTail(path: jsonlPath)
+                    let (cwd, lastPrompt, _, isSubagent, teamName) = self.readJSONLTail(path: jsonlPath)
+
+                    // Track team agent sessions for parent linking
+                    if isSubagent, let tn = teamName {
+                        newTeamAgents[sessionId] = tn
+                    }
 
                     // Skip subagent sessions (team members, Task tool agents)
                     if isSubagent { continue }
@@ -436,6 +457,7 @@ class SessionReader: ObservableObject {
             }
 
             self.derivedData = newDerived
+            self.teamAgentSessions = newTeamAgents
         }
     }
 
@@ -754,14 +776,15 @@ class SessionReader: ObservableObject {
     }
 
     func readSessions() {
+        let teamLeads = teamReader?.leadSessionByTeamName ?? [:]
         ioQueue.async { [weak self] in
             guard let self = self else { return }
-            self._readSessionsOnIOQueue()
+            self._readSessionsOnIOQueue(teamLeadsByName: teamLeads)
         }
     }
 
     /// Actual readSessions implementation — must be called on ioQueue.
-    private func _readSessionsOnIOQueue() {
+    private func _readSessionsOnIOQueue(teamLeadsByName: [String: String] = [:]) {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir) else {
             DispatchQueue.main.async { self.sessions = [] }
@@ -878,6 +901,14 @@ class SessionReader: ObservableObject {
                 agent_count: derived.agentCount
             )
             loaded.append(session)
+        }
+
+        // --- Team agent linking: set parent_session_id from JSONL teamName ---
+        for i in loaded.indices {
+            if let teamName = self.teamAgentSessions[loaded[i].session_id],
+               let leadSid = teamLeadsByName[teamName] {
+                loaded[i].parent_session_id = leadSid
+            }
         }
 
         // --- Sub-agent aggregation: propagate child attention to parent, hide child rows ---
@@ -2332,6 +2363,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        reader.teamReader = teamReader
 
         shortcutManager = ShortcutManager { [weak self] in
             DispatchQueue.main.async { self?.jumpToNextSession() }
