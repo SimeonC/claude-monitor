@@ -60,6 +60,29 @@ PROJECT=$(basename "${CWD:-unknown}")
 PROJECT_NAME=$(echo "$PROJECT" | sed 's/[-_]/ /g')
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+# --- Team agent detection ---
+# Team agents run in separate tmux sessions (not child processes of the team lead).
+# Walk process tree to the first `claude` ancestor and check for --parent-session-id.
+detect_parent_session_id() {
+    local pid=$$
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -z "$pid" ] || [ "$pid" = "1" ] || [ "$pid" = "0" ] && break
+        local comm
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)
+        if [ "$comm" = "claude" ]; then
+            local args
+            args=$(ps -ww -o args= -p "$pid" 2>/dev/null)
+            if echo "$args" | grep -q -- '--parent-session-id'; then
+                PARENT_SESSION_ID=$(echo "$args" | sed -n 's/.*--parent-session-id[= ]\([^ ]*\).*/\1/p')
+                [ -n "$PARENT_SESSION_ID" ] && return 0
+            fi
+            return 1
+        fi
+    done
+    return 1
+}
+
 # --- Sub-agent detection ---
 # Skip hooks fired by sub-agents (team members, Task tool agents).
 # Process tree: monitor.sh → sh → claude (this session) → ... → claude (parent session)
@@ -83,6 +106,12 @@ if is_subagent; then
     IS_SUBAGENT=true
 else
     IS_SUBAGENT=false
+fi
+
+# Team agents aren't child processes, but they have --parent-session-id in their CLI args
+if ! $IS_SUBAGENT && detect_parent_session_id; then
+    IS_SUBAGENT=true
+    IS_TEAM_AGENT=true
 fi
 
 # --- Detect --dangerously-skip-permissions flag ---
@@ -145,34 +174,76 @@ ensure_subagent_file() {
 
 # --- Sub-agent event handling ---
 if [ "$IS_SUBAGENT" = "true" ]; then
-    case "$EVENT" in
-        Notification)
-            NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
-            if ensure_subagent_file; then
-                if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
-                    update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
-                        '.status = "idle" | .updated_at = $updated'
-                elif [ "$NOTIF_TYPE" = "permission_prompt" ]; then
-                    update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
-                        '.status = "attention" | .updated_at = $updated'
+    if [ "${IS_TEAM_AGENT:-false}" = "true" ]; then
+        # Team agent: use own session file with parent_session_id set
+        case "$EVENT" in
+            SessionStart)
+                jq -n \
+                    --arg sid "$SESSION_ID" \
+                    --arg status "working" \
+                    --arg project "$PROJECT" \
+                    --arg cwd "${CWD:-}" \
+                    --arg parent "$PARENT_SESSION_ID" \
+                    --arg now "$NOW" \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: "", terminal_session_id: "", started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent}' \
+                    > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+                ;;
+            Notification)
+                NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
+                if [ -f "$SESSION_FILE" ]; then
+                    if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
+                        update_json_file "$SESSION_FILE" --arg updated "$NOW" \
+                            '.status = "idle" | .updated_at = $updated'
+                    elif [ "$NOTIF_TYPE" = "permission_prompt" ]; then
+                        update_json_file "$SESSION_FILE" --arg updated "$NOW" \
+                            '.status = "attention" | .updated_at = $updated'
+                    fi
                 fi
-            fi
-            ;;
-        PreToolUse|PostToolUse|PostToolUseFailure)
-            if ensure_subagent_file; then
-                update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
-                    'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
-            fi
-            ;;
-        Stop)
-            if find_subagent_session_file && [ -f "$SUBAGENT_SESSION_FILE" ]; then
-                rm -f "$SUBAGENT_SESSION_FILE"
-            fi
-            ;;
-        *)
-            # All other sub-agent events: ignore
-            ;;
-    esac
+                ;;
+            PreToolUse|PostToolUse|PostToolUseFailure|UserPromptSubmit)
+                if [ -f "$SESSION_FILE" ]; then
+                    update_json_file "$SESSION_FILE" --arg updated "$NOW" \
+                        'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
+                fi
+                ;;
+            Stop|SessionEnd)
+                rm -f "$SESSION_FILE" "$SESSIONS_DIR/${SESSION_ID}.context" "$SESSIONS_DIR/${SESSION_ID}.model"
+                ;;
+            *)
+                # All other team agent events: ignore
+                ;;
+        esac
+    else
+        # Regular sub-agent: transcript-path based
+        case "$EVENT" in
+            Notification)
+                NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"')
+                if ensure_subagent_file; then
+                    if [ "$NOTIF_TYPE" = "idle_prompt" ]; then
+                        update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
+                            '.status = "idle" | .updated_at = $updated'
+                    elif [ "$NOTIF_TYPE" = "permission_prompt" ]; then
+                        update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
+                            '.status = "attention" | .updated_at = $updated'
+                    fi
+                fi
+                ;;
+            PreToolUse|PostToolUse|PostToolUseFailure)
+                if ensure_subagent_file; then
+                    update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
+                        'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
+                fi
+                ;;
+            Stop)
+                if find_subagent_session_file && [ -f "$SUBAGENT_SESSION_FILE" ]; then
+                    rm -f "$SUBAGENT_SESSION_FILE"
+                fi
+                ;;
+            *)
+                # All other sub-agent events: ignore
+                ;;
+        esac
+    fi
     exit 0
 fi
 
