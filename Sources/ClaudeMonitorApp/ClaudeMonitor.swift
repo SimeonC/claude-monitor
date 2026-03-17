@@ -1012,10 +1012,22 @@ class SessionReader: ObservableObject {
 // MARK: - Active Session Tracker
 
 class ActiveSessionTracker: ObservableObject {
-    @Published var activeSessionId: String?
+    @Published var activeSessionId: String? {
+        didSet {
+            // Snapshot TTY of the active session for carryover on restart
+            if let newId = activeSessionId,
+               let session = sessionReader?.sessions.first(where: { $0.session_id == newId }) {
+                lastActiveTTY = session.terminal_session_id
+                lastActiveTTYTime = Date()
+            }
+        }
+    }
     private weak var sessionReader: SessionReader?
     private var pollTimer: Timer?
     private var workspaceObserver: Any?
+    private var sessionsObserver: AnyCancellable?
+    private var lastActiveTTY: String?
+    private var lastActiveTTYTime: Date?
     private let backgroundQueue = DispatchQueue(label: "com.claudemonitor.activesession", qos: .utility)
 
     private let terminalBundleIds: Set<String> = [
@@ -1033,6 +1045,10 @@ class ActiveSessionTracker: ObservableObject {
         ) { [weak self] notification in
             self?.handleAppActivation(notification)
         }
+        // React to session list changes immediately for TTY carryover
+        sessionsObserver = sessionReader.$sessions.sink { [weak self] _ in
+            self?.tryTTYCarryover()
+        }
         // Check current app on init
         if let app = NSWorkspace.shared.frontmostApplication,
            let bundleId = app.bundleIdentifier,
@@ -1045,6 +1061,7 @@ class ActiveSessionTracker: ObservableObject {
         if let obs = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
         }
+        sessionsObserver?.cancel()
         pollTimer?.invalidate()
     }
 
@@ -1077,8 +1094,40 @@ class ActiveSessionTracker: ObservableObject {
         }
     }
 
+    /// When the active session disappears (e.g. plan-accept restart) and a new session
+    /// appears on the same TTY within 10s, auto-transfer focus — no AppleScript needed.
+    private func tryTTYCarryover() {
+        guard let tty = lastActiveTTY, !tty.isEmpty,
+              let ttyTime = lastActiveTTYTime,
+              Date().timeIntervalSince(ttyTime) < 10,
+              let sessions = sessionReader?.sessions else { return }
+        // Only act if the current activeSessionId is stale (no longer in session list)
+        if let currentId = activeSessionId,
+           sessions.contains(where: { $0.session_id == currentId }) {
+            return  // still valid
+        }
+        // Find a replacement session on the same TTY
+        if let replacement = sessions.first(where: { $0.terminal_session_id == tty }) {
+            debugLog("TTY carryover: \(activeSessionId ?? "nil") → \(replacement.session_id) on \(tty)")
+            activeSessionId = replacement.session_id
+        }
+    }
+
     private func detectActiveSession() {
         guard let sessions = sessionReader?.sessions, !sessions.isEmpty else { return }
+
+        // Try TTY carryover before expensive AppleScript polling
+        if activeSessionId == nil || !sessions.contains(where: { $0.session_id == activeSessionId }) {
+            if let tty = lastActiveTTY, !tty.isEmpty,
+               let ttyTime = lastActiveTTYTime,
+               Date().timeIntervalSince(ttyTime) < 10,
+               let replacement = sessions.first(where: { $0.terminal_session_id == tty }) {
+                debugLog("TTY carryover (poll): \(activeSessionId ?? "nil") → \(replacement.session_id) on \(tty)")
+                activeSessionId = replacement.session_id
+                return
+            }
+        }
+
         guard let app = NSWorkspace.shared.frontmostApplication,
               let bundleId = app.bundleIdentifier else { return }
 

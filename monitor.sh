@@ -402,6 +402,23 @@ set_working() {
 # --- Handle events ---
 case "$EVENT" in
     SessionStart)
+        # If terminal detection failed, inherit from a recently-ended session in same CWD
+        if [ -z "$TERM_SID" ] && [ -n "$CWD" ]; then
+            for f in "$SESSIONS_DIR"/*.json; do
+                [ -f "$f" ] || continue
+                local_status=$(jq -r '.status // ""' "$f" 2>/dev/null)
+                [ "$local_status" = "ended" ] || continue
+                local_cwd=$(jq -r '.cwd // ""' "$f" 2>/dev/null)
+                [ "$local_cwd" = "$CWD" ] || continue
+                local_term=$(jq -r '.terminal // ""' "$f" 2>/dev/null)
+                local_tid=$(jq -r '.terminal_session_id // ""' "$f" 2>/dev/null)
+                if [ -n "$local_tid" ]; then
+                    TERM_APP="${local_term}"
+                    TERM_SID="${local_tid}"
+                    break
+                fi
+            done
+        fi
         cleanup_same_terminal
         seed_tty_map
         # Detect --dangerously-skip-permissions once at session start.
