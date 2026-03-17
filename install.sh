@@ -63,6 +63,7 @@ echo "Compiling Claude Monitor..."
 
 echo "Build successful."
 cp "$REPO_DIR/.build/release/ClaudeMonitor" "$BINARY"
+codesign -s - --force "$BINARY"
 cp "$REPO_DIR/monitor.sh" "$HOOKS_DIR/monitor.sh"
 chmod +x "$HOOKS_DIR/monitor.sh"
 
