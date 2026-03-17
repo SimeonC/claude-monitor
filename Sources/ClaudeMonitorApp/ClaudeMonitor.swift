@@ -378,7 +378,14 @@ class SessionReader: ObservableObject {
             let twoMinAgo = now.addingTimeInterval(-120)
 
             var newDerived: [String: DerivedSessionData] = [:]
+            // Carry forward known team agents whose session files still exist
             var newTeamAgents: [String: String] = [:]
+            for (sid, teamName) in self.teamAgentSessions {
+                if fm.fileExists(atPath: "\(self.sessionsDir)/\(sid).json"),
+                   !self.endedSessionIds.contains(sid) {
+                    newTeamAgents[sid] = teamName
+                }
+            }
 
             for projectDir in projectDirs {
                 let projectPath = "\(self.projectsDir)/\(projectDir)"
