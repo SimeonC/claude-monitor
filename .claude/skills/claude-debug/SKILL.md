@@ -2,6 +2,7 @@
 name: claude-debug
 description: Debug Claude Code session and team management issues. Snapshot ~/.claude state, analyze team agent detection, diagnose session linking problems, and generate detailed debugging reports.
 tools: Bash, Read, Write, Glob, Grep
+disable-model-invocation: false
 ---
 
 # Claude Code Debug Skill
