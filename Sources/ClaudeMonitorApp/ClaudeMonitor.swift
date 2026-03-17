@@ -177,7 +177,11 @@ class SessionReader: ObservableObject {
     private var teamAgentSessions: [String: String] = [:]
 
     /// Reference to TeamReader for looking up team lead session IDs
-    weak var teamReader: TeamReader?
+    weak var teamReader: TeamReader? {
+        didSet {
+            if teamReader != nil { readSessions() }
+        }
+    }
 
     private let monitorDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -396,24 +400,27 @@ class SessionReader: ObservableObject {
                 for file in files where file.hasSuffix(".jsonl") {
                     let jsonlPath = "\(projectPath)/\(file)"
 
-                    // Check mtime — only active sessions (modified within 2 min)
+                    // Check mtime
                     guard let attrs = try? fm.attributesOfItem(atPath: jsonlPath),
                         let mtime = attrs[.modificationDate] as? Date
                     else { continue }
-                    guard mtime > twoMinAgo else { continue }
+                    let isFresh = mtime > twoMinAgo
 
                     let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
-                    // Read last ~4KB to extract info
+                    // Read last ~4KB to extract info (even from stale files, to detect team agents)
                     let (cwd, lastPrompt, _, isSubagent, teamName) = self.readJSONLTail(path: jsonlPath)
 
-                    // Track team agent sessions for parent linking
+                    // Track team agent sessions for parent linking (from both fresh and stale files)
                     if isSubagent, let tn = teamName {
                         newTeamAgents[sessionId] = tn
                     }
 
-                    // Skip subagent sessions (team members, Task tool agents)
+                    // Skip subagent sessions — but allow stale files for display if they're not subagents
                     if isSubagent { continue }
+
+                    // Only populate derivedData from fresh files
+                    if !isFresh { continue }
 
                     // No cwd in tail → can't determine project, skip
                     if cwd.isEmpty { continue }
@@ -915,6 +922,8 @@ class SessionReader: ObservableObject {
             if let teamName = self.teamAgentSessions[loaded[i].session_id],
                let leadSid = teamLeadsByName[teamName] {
                 loaded[i].parent_session_id = leadSid
+                NSLog("[ClaudeMonitor] Linked agent %@ (team: %@) → lead %@",
+                      loaded[i].session_id, teamName, leadSid)
             }
         }
 

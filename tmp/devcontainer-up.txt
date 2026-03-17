@@ -1,227 +1,0 @@
-[2026-03-04T05:13:37.819Z] @devcontainers/cli 0.83.3. Node.js v24.11.0. darwin 25.3.0 arm64.
-[2026-03-04T05:13:38.341Z] Resolving Feature dependencies for 'ghcr.io/meaningful-ooo/devcontainer-features/fish:1'...
-[2026-03-04T05:13:39.270Z] Soft-dependency 'ghcr.io/devcontainers/features/common-utils' is not required.  Removing from installation order...
-[2026-03-04T05:13:39.609Z] Files to omit: ''
-[2026-03-04T05:13:39.616Z] Start: Run: docker buildx build --load --build-arg BUILDKIT_INLINE_CACHE=1 --build-context dev_containers_feature_content_source=/var/folders/7m/qxgxzpvd41x5cyyt45wq21280000gp/T/devcontainercli/container-features/0.83.3-1772601218340 --build-arg _DEV_CONTAINERS_BASE_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04 --build-arg _DEV_CONTAINERS_IMAGE_USER=root --build-arg _DEV_CONTAINERS_FEATURE_CONTENT_SOURCE=dev_container_feature_content_temp --target dev_containers_target_stage -f /var/folders/7m/qxgxzpvd41x5cyyt45wq21280000gp/T/devcontainercli/container-features/0.83.3-1772601218340/Dockerfile.extended -t vsc-manager-ember-desktop-315c1daae51e2dbe08e5c7512e34345b61595cef420c8e76451d6059099db5c8-features /var/folders/7m/qxgxzpvd41x5cyyt45wq21280000gp/T/devcontainercli/empty-folder
-[2026-03-04T05:13:39.955Z] #0 building with "colima" instance using docker driver
-
-#1 [internal] load build definition from Dockerfile.extended
-#1 transferring dockerfile: 3.85kB done
-#1 DONE 0.0s
-
-#2 [context dev_containers_feature_content_source] load .dockerignore
-
-[2026-03-04T05:13:39.955Z] #2 transferring dev_containers_feature_content_source: 2B done
-#2 DONE 0.0s
-
-#3 [internal] load metadata for mcr.microsoft.com/devcontainers/base:ubuntu-24.04
-#3 DONE 0.0s
-
-#4 [internal] load .dockerignore
-#4 transferring context: 2B done
-#4 DONE 0.0s
-
-#5 [context dev_containers_feature_content_source] load from client
-#5 transferring dev_containers_feature_content_source: 1.48kB done
-#5 DONE 0.0s
-
-#6 [dev_containers_feature_content_normalize 1/3] FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
-#6 resolve mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae done
-#6 DONE 0.0s
-
-#7 [context dev_containers_feature_content_source] load from client
-#7 transferring dev_containers_feature_content_source: 136B done
-#7 DONE 0.0s
-
-#8 [dev_containers_target_stage 4/5] RUN echo "_CONTAINER_USER_HOME=$( (command -v getent >/dev/null 2>&1 && getent passwd 'root' || grep -E '^root|^[^:]*:[^:]*:root:' /etc/passwd || true) | cut -d: -f6)" >> /tmp/dev-container-features/devcontainer-features.builtin.env && echo "_REMOTE_USER_HOME=$( (command -v getent >/dev/null 2>&1 && getent passwd 'root' || grep -E '^root|^[^:]*:[^:]*:root:' /etc/passwd || true) | cut -d: -f6)" >> /tmp/dev-container-features/devcontainer-features.builtin.env
-#8 CACHED
-
-#9 [dev_containers_feature_content_normalize 2/3] COPY --from=dev_containers_feature_content_source devcontainer-features.builtin.env /tmp/build-features/
-#9 CACHED
-
-#10 [dev_containers_target_stage 3/5] COPY --from=dev_containers_feature_content_normalize /tmp/build-features/ /tmp/dev-container-features
-#10 CACHED
-
-#11 [dev_containers_target_stage 2/5] RUN mkdir -p /tmp/dev-container-features
-#11 CACHED
-
-#12 [dev_containers_feature_content_normalize 3/3] RUN chmod -R 0755 /tmp/build-features/
-#12 CACHED
-
-#13 [dev_containers_target_stage 5/5] RUN --mount=type=bind,from=dev_containers_feature_content_source,source=fish_0,target=/tmp/build-features-src/fish_0     cp -ar /tmp/build-features-src/fish_0 /tmp/dev-container-features  && chmod -R 0755 /tmp/dev-container-features/fish_0  && cd /tmp/dev-container-features/fish_0  && chmod +x ./devcontainer-features-install.sh  && ./devcontainer-features-install.sh  && rm -rf /tmp/dev-container-features/fish_0
-#13 CACHED
-
-#14 exporting to image
-#14 exporting layers done
-#14 preparing layers for inline cache 0.1s done
-
-[2026-03-04T05:13:40.091Z] #14 exporting manifest sha256:c70339f8c84be8252b2932fe59d798b48c75bf8bd25f647e3b29dcd7675b93bb 0.0s done
-#14 exporting config sha256:938b22880f9c4e434528c29f9f61f99a1229231569f09593d584b8e42892a978 0.0s done
-#14 exporting attestation manifest sha256:890441d0d650d4b3b3709656b22abfc5c4d80861e411c84c63048196025c6143 0.0s done
-#14 exporting manifest list sha256:94a5cf8a7916ecd7a4689d6dc4ad6144e38f625f45901d26deb1a54f1ef21bc8 done
-#14 naming to docker.io/library/vsc-manager-ember-desktop-315c1daae51e2dbe08e5c7512e34345b61595cef420c8e76451d6059099db5c8-features:latest done
-#14 unpacking to docker.io/library/vsc-manager-ember-desktop-315c1daae51e2dbe08e5c7512e34345b61595cef420c8e76451d6059099db5c8-features:latest done
-#14 DONE 0.2s
-
-View build details: docker-desktop://dashboard/build/colima/colima/sv1zhru9udeuwnguvdqqc82ef
-
-[2026-03-04T05:13:40.097Z] Start: Run: docker run --sig-proxy=false -a STDOUT -a STDERR --mount type=bind,source=/Users/simeoncheeseman/Development/manager-ember-desktop,target=/workspaces/manager-ember-desktop,consistency=cached --mount source=/Users/simeoncheeseman/.config/fish/config.fish,target=/root/.config/fish/config.fish,type=bind,readonly --mount source=/Users/simeoncheeseman/.config/fish/functions,target=/root/.config/fish/functions,type=bind,readonly --mount source=/Users/simeoncheeseman/.config/fish/completions,target=/root/.config/fish/completions,type=bind,readonly --mount source=/Users/simeoncheeseman/.config/fish/conf.d,target=/root/.config/fish/conf.d,type=bind,readonly --mount source=/Users/simeoncheeseman/.config/fish/themes,target=/root/.config/fish/themes,type=bind,readonly --mount source=/Users/simeoncheeseman/.config/fish/claude,target=/root/.config/fish/claude,type=bind,readonly --mount source=/Users/simeoncheeseman/.claude,target=/root/.claude,type=bind --mount source=/Users/simeoncheeseman/.aws,target=/root/.aws,type=bind,readonly --mount source=manager-ember-desktop-node-modules,target=/workspaces/manager-ember-desktop/node_modules,type=volume -l devcontainer.local_folder=/Users/simeoncheeseman/Development/manager-ember-desktop -l devcontainer.config_file=/Users/simeoncheeseman/Development/manager-ember-desktop/.devcontainer.local/devcontainer.json --env-file /Users/simeoncheeseman/Development/manager-ember-desktop/.devcontainer.local/container.env --entrypoint /bin/sh vsc-manager-ember-desktop-315c1daae51e2dbe08e5c7512e34345b61595cef420c8e76451d6059099db5c8-features -c echo Container started
-[2026-03-04T05:13:40.228Z] Container started
-[2026-03-04T05:13:40.308Z] Running the postCreateCommand from devcontainer.json...
-
-[2026-03-04T05:13:40.970Z] Get:1 http://ports.ubuntu.com/ubuntu-ports noble InRelease [256 kB]
-[2026-03-04T05:13:41.550Z] Get:2 https://ppa.launchpadcontent.net/fish-shell/release-3/ubuntu noble InRelease [18.1 kB]
-[2026-03-04T05:13:41.829Z] Get:3 https://ppa.launchpadcontent.net/fish-shell/release-3/ubuntu noble/main arm64 Packages [515 B]
-[2026-03-04T05:13:41.893Z] Get:4 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease [126 kB]
-[2026-03-04T05:13:42.240Z] Get:5 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease [126 kB]
-[2026-03-04T05:13:42.498Z] Get:6 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease [126 kB]
-[2026-03-04T05:13:42.715Z] Get:7 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages [1776 kB]
-[2026-03-04T05:13:43.252Z] Get:8 http://ports.ubuntu.com/ubuntu-ports noble/multiverse arm64 Packages [274 kB]
-[2026-03-04T05:13:43.285Z] Get:9 http://ports.ubuntu.com/ubuntu-ports noble/restricted arm64 Packages [113 kB]
-[2026-03-04T05:13:43.297Z] Get:10 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages [19.0 MB]
-[2026-03-04T05:13:44.265Z] Get:11 http://ports.ubuntu.com/ubuntu-ports noble-updates/multiverse arm64 Packages [41.7 kB]
-Get:12 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages [2385 kB]
-[2026-03-04T05:13:44.368Z] Get:13 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages [4825 kB]
-[2026-03-04T05:13:44.624Z] Get:14 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages [1975 kB]
-[2026-03-04T05:13:44.738Z] Get:15 http://ports.ubuntu.com/ubuntu-ports noble-backports/universe arm64 Packages [34.7 kB]
-[2026-03-04T05:13:44.739Z] Get:16 http://ports.ubuntu.com/ubuntu-ports noble-backports/main arm64 Packages [49.4 kB]
-[2026-03-04T05:13:44.741Z] Get:17 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages [4620 kB]
-[2026-03-04T05:13:45.134Z] Get:18 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages [1261 kB]
-[2026-03-04T05:13:45.188Z] Get:19 http://ports.ubuntu.com/ubuntu-ports noble-security/multiverse arm64 Packages [42.1 kB]
-Get:20 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages [2017 kB]
-[2026-03-04T05:13:45.370Z] Fetched 39.1 MB in 5s (7849 kB/s)
-Reading package lists...
-[2026-03-04T05:13:45.906Z] 
-[2026-03-04T05:13:45.911Z] W: https://ppa.launchpadcontent.net/fish-shell/release-3/ubuntu/dists/noble/InRelease: Signature by key 59FDA1CE1B84B3FAD89366C027557F056DC33CA5 uses weak algorithm (rsa1024)
-[2026-03-04T05:13:45.914Z] Reading package lists...
-[2026-03-04T05:13:46.479Z] 
-[2026-03-04T05:13:46.485Z] Building dependency tree...
-[2026-03-04T05:13:46.614Z] 
-Reading state information...
-[2026-03-04T05:13:46.755Z] jq is already the newest version (1.7.1-3ubuntu0.24.04.1).
-build-essential is already the newest version (12.10ubuntu1).
-unzip is already the newest version (6.0-28ubuntu4.1).
-The following additional packages will be installed:
-[2026-03-04T05:13:46.755Z]   libevent-core-2.1-7t64 libutempter0
-[2026-03-04T05:13:46.772Z] The following NEW packages will be installed:
-[2026-03-04T05:13:46.773Z]   direnv libevent-core-2.1-7t64 libutempter0 tmux
-[2026-03-04T05:13:47.120Z] 0 upgraded, 4 newly installed, 0 to remove and 73 not upgraded.
-Need to get 2895 kB of archives.
-After this operation, 8556 kB of additional disk space will be used.
-Get:1 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 direnv arm64 2.32.1-2ubuntu0.24.04.3 [2331 kB]
-[2026-03-04T05:13:48.571Z] Get:2 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 libevent-core-2.1-7t64 arm64 2.1.12-stable-9ubuntu2 [90.3 kB]
-[2026-03-04T05:13:48.576Z] Get:3 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 libutempter0 arm64 1.2.1-3build1 [9590 B]
-[2026-03-04T05:13:48.577Z] Get:4 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 tmux arm64 3.4-1ubuntu0.1 [465 kB]
-[2026-03-04T05:13:48.711Z] debconf: unable to initialize frontend: Dialog
-debconf: (TERM is not set, so the dialog frontend is not usable.)
-debconf: falling back to frontend: Readline
-[2026-03-04T05:13:48.713Z] debconf: unable to initialize frontend: Readline
-debconf: (This frontend requires a controlling tty.)
-debconf: falling back to frontend: Teletype
-[2026-03-04T05:13:48.714Z] dpkg-preconfigure: unable to re-open stdin: 
-[2026-03-04T05:13:48.734Z] Fetched 2895 kB in 2s (1577 kB/s)
-[2026-03-04T05:13:48.743Z] Selecting previously unselected package direnv.
-(Reading database ... 
-[2026-03-04T05:13:48.744Z] (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%
-[2026-03-04T05:13:48.744Z] (Reading database ... 70%
-[2026-03-04T05:13:48.745Z] (Reading database ... 75%
-[2026-03-04T05:13:48.746Z] (Reading database ... 80%
-[2026-03-04T05:13:48.747Z] (Reading database ... 85%
-[2026-03-04T05:13:48.748Z] (Reading database ... 90%
-[2026-03-04T05:13:48.749Z] (Reading database ... 95%
-[2026-03-04T05:13:48.750Z] (Reading database ... 100%(Reading database ... 22866 files and directories currently installed.)
-[2026-03-04T05:13:48.751Z] Preparing to unpack .../direnv_2.32.1-2ubuntu0.24.04.3_arm64.deb ...
-[2026-03-04T05:13:48.754Z] Unpacking direnv (2.32.1-2ubuntu0.24.04.3) ...
-[2026-03-04T05:13:48.790Z] Selecting previously unselected package libevent-core-2.1-7t64:arm64.
-[2026-03-04T05:13:48.791Z] Preparing to unpack .../libevent-core-2.1-7t64_2.1.12-stable-9ubuntu2_arm64.deb ...
-[2026-03-04T05:13:48.793Z] Unpacking libevent-core-2.1-7t64:arm64 (2.1.12-stable-9ubuntu2) ...
-[2026-03-04T05:13:48.806Z] Selecting previously unselected package libutempter0:arm64.
-[2026-03-04T05:13:48.807Z] Preparing to unpack .../libutempter0_1.2.1-3build1_arm64.deb ...
-[2026-03-04T05:13:48.809Z] Unpacking libutempter0:arm64 (1.2.1-3build1) ...
-[2026-03-04T05:13:48.819Z] Selecting previously unselected package tmux.
-[2026-03-04T05:13:48.819Z] Preparing to unpack .../tmux_3.4-1ubuntu0.1_arm64.deb ...
-[2026-03-04T05:13:48.822Z] Unpacking tmux (3.4-1ubuntu0.1) ...
-[2026-03-04T05:13:48.839Z] Setting up direnv (2.32.1-2ubuntu0.24.04.3) ...
-[2026-03-04T05:13:48.843Z] Setting up libutempter0:arm64 (1.2.1-3build1) ...
-[2026-03-04T05:13:48.846Z] Setting up libevent-core-2.1-7t64:arm64 (2.1.12-stable-9ubuntu2) ...
-[2026-03-04T05:13:48.850Z] Setting up tmux (3.4-1ubuntu0.1) ...
-[2026-03-04T05:13:48.853Z] Processing triggers for man-db (2.12.0-4build2) ...
-[2026-03-04T05:13:48.904Z] Processing triggers for debianutils (5.17build1) ...
-[2026-03-04T05:13:48.924Z] Processing triggers for libc-bin (2.39-0ubuntu8.6) ...
-[2026-03-04T05:13:48.946Z]   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                 Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
-[2026-03-04T05:13:49.912Z]  51 61.2M   51 31.8M    0     0  32.9M      0  0:00:01 --:--:--  0:00:01 32.9M
-[2026-03-04T05:13:50.695Z] 100 61.2M  100 61.2M    0     0  35.0M      0  0:00:01  0:00:01 --:--:-- 35.0M
-[2026-03-04T05:13:52.650Z] You can now run: /usr/local/bin/aws --version
-[2026-03-04T05:13:52.729Z]   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                 Dload  Upload   Total   Spent    Left  Speed
-  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
-[2026-03-04T05:13:52.788Z] 100 10374  100 10374    0     0   172k      0 --:--:-- --:--:-- --:--:--  174k
-[2026-03-04T05:13:52.791Z] grep: Unmatched ) or \)
-[2026-03-04T05:13:52.792Z] mise: installing mise...
-[2026-03-04T05:13:52.928Z] #=#=#                                                                          
-[2026-03-04T05:13:53.194Z] ##O#-#                                                                         
-[2026-03-04T05:13:53.295Z]                                                                            0.4%
-[2026-03-04T05:13:53.395Z] #########                                                                 13.3%
-[2026-03-04T05:13:53.496Z] #####################                                                     29.9%
-[2026-03-04T05:13:53.596Z] #################################                                         46.6%
-[2026-03-04T05:13:53.695Z] ##############################################                            64.7%
-[2026-03-04T05:13:53.796Z] ############################################################              83.8%
-[2026-03-04T05:13:53.899Z] ##################################################################        91.7%
-[2026-03-04T05:13:53.909Z] ######################################################################## 100.0%
-[2026-03-04T05:13:54.768Z] mise: installed successfully to /root/.local/bin/mise
-mise: run `/root/.local/bin/mise --help` to get started
-[2026-03-04T05:13:55.736Z] downloading grit 0.1.0-alpha.1743007075 aarch64-unknown-linux-gnu
-[2026-03-04T05:14:11.637Z] installing to /root/.grit/bin
-[2026-03-04T05:14:11.638Z]   grit
-everything's installed!
-[2026-03-04T05:14:11.669Z] 
-To add $HOME/.grit/bin to your PATH, either restart your shell or run:
-
-    source $HOME/.grit/bin/env (sh, bash, zsh)
-    source $HOME/.grit/bin/env.fish (fish)
-[2026-03-04T05:14:22.175Z] Setting up Claude Code...
-[2026-03-04T05:14:23.046Z] 
-Claude configuration file not found at: /root/.claude.json
-A backup file exists at: /root/.claude/backups/.claude.json.backup.1772601103839
-You can manually restore it by running: cp "/root/.claude/backups/.claude.json.backup.1772601103839" "/root/.claude.json"
-
-[2026-03-04T05:14:23.047Z] 
-Claude configuration file not found at: /root/.claude.json
-A backup file exists at: /root/.claude/backups/.claude.json.backup.1772601103839
-You can manually restore it by running: cp "/root/.claude/backups/.claude.json.backup.1772601103839" "/root/.claude.json"
-
-[2026-03-04T05:14:23.066Z] 
-Claude configuration file not found at: /root/.claude.json
-A backup file exists at: /root/.claude/backups/.claude.json.backup.1772601103839
-You can manually restore it by running: cp "/root/.claude/backups/.claude.json.backup.1772601103839" "/root/.claude.json"
-
-[2026-03-04T05:14:23.195Z] 
-Checking installation status...
-[2026-03-04T05:14:23.220Z] 
-Installing Claude Code native build latest...
-[2026-03-04T05:14:41.992Z] 
-Setting up launcher and shell integration...
-[2026-03-04T05:14:42.062Z] 
-✔ Claude Code successfully installed!
-
-  Version: 2.1.66
-
-  Location: ~/.local/bin/claude
-
-
-  Next: Run claude --help to get started
-[2026-03-04T05:14:44.064Z] 
-✔ Claude Code successfully installed!
-
-  Version: 2.1.66
-
-  Location: ~/.local/bin/claude
-
-
-  Next: Run claude --help to get started
-[2026-03-04T05:14:44.094Z] 
-✅ Installation complete!
-
-{"outcome":"success","containerId":"7807f991683d327eb0a14197e5602597da0012df283b04ddb917a5124ca95326","remoteUser":"root","remoteWorkspaceFolder":"/workspaces/manager-ember-desktop"}
