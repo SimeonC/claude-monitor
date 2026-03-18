@@ -2,6 +2,23 @@ import Foundation
 
 // MARK: - Session Model
 
+private let isoFormatterWithFractional: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+}()
+
+private let isoFormatterBasic: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+}()
+
+/// Parse an ISO8601 date string, trying fractional seconds first then without.
+private func parseISO8601(_ string: String) -> Date? {
+    isoFormatterWithFractional.date(from: string) ?? isoFormatterBasic.date(from: string)
+}
+
 public struct SessionInfo: Codable, Identifiable {
     public let session_id: String
     public var status: String
@@ -108,15 +125,7 @@ public struct SessionInfo: Codable, Identifiable {
     }
 
     public var elapsedString: String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        // Try with fractional seconds first, then without
-        var date = formatter.date(from: started_at)
-        if date == nil {
-            formatter.formatOptions = [.withInternetDateTime]
-            date = formatter.date(from: started_at)
-        }
-        guard let start = date else { return "" }
+        guard let start = parseISO8601(started_at) else { return "" }
         let elapsed = Date().timeIntervalSince(start)
         if elapsed < 60 { return "\(Int(elapsed))s" }
         if elapsed < 3600 { return "\(Int(elapsed / 60))m" }
@@ -127,14 +136,7 @@ public struct SessionInfo: Codable, Identifiable {
     /// Returns whether the session hasn't been updated within the last 10 minutes,
     /// relative to the given reference date (injectable for testing).
     public func isStale(at referenceDate: Date = Date()) -> Bool {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        var date = formatter.date(from: updated_at)
-        if date == nil {
-            formatter.formatOptions = [.withInternetDateTime]
-            date = formatter.date(from: updated_at)
-        }
-        guard let updated = date else { return false }
+        guard let updated = parseISO8601(updated_at) else { return false }
         return referenceDate.timeIntervalSince(updated) > 600  // 10 minutes
     }
 

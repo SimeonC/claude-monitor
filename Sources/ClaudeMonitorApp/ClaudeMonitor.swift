@@ -169,6 +169,9 @@ class SessionReader: ObservableObject {
     private var previousSessionFileIds: Set<String> = []
     /// Serial queue for all disk I/O and state mutations (keeps main thread free for UI)
     private let ioQueue = DispatchQueue(label: "com.claudemonitor.sessionio", qos: .userInitiated)
+    /// Guards to prevent overlapping scan/prune dispatches when a cycle takes longer than the timer interval
+    private var scanQueued = false
+    private var pruneQueued = false
 
     /// TTY → Ghostty UUID mapping for click-to-switch (loaded from tty_map.json)
     private(set) var ttyMap: [String: String] = [:]
@@ -374,8 +377,11 @@ class SessionReader: ObservableObject {
     /// Scan `~/.claude/projects/` JSONL files to populate in-memory derivedData.
     /// No session files are written — readSessions() merges this data at display time.
     func scanProjects() {
+        guard !scanQueued else { return }
+        scanQueued = true
         ioQueue.async { [weak self] in
             guard let self = self else { return }
+            defer { self.scanQueued = false }
             let fm = FileManager.default
             guard let projectDirs = try? fm.contentsOfDirectory(atPath: self.projectsDir) else { return }
             let now = Date()
@@ -408,7 +414,11 @@ class SessionReader: ObservableObject {
 
                     let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
-                    // Read last ~4KB to extract info (even from stale files, to detect team agents)
+                    // For stale files: only read tail if already known as a team agent (to maintain linking).
+                    // Fresh files always get their tail read.
+                    let needsTailRead = isFresh || self.teamAgentSessions[sessionId] != nil
+                    guard needsTailRead else { continue }
+
                     let (cwd, lastPrompt, _, isSubagent, teamName) = self.readJSONLTail(path: jsonlPath)
 
                     // Track team agent sessions for parent linking (from both fresh and stale files)
@@ -477,8 +487,11 @@ class SessionReader: ObservableObject {
 
     /// Detect dead sessions and delete their files from disk.
     func pruneDeadSessions() {
+        guard !pruneQueued else { return }
+        pruneQueued = true
         ioQueue.async { [weak self] in
             guard let self = self else { return }
+            defer { self.pruneQueued = false }
             let fm = FileManager.default
             guard let files = try? fm.contentsOfDirectory(atPath: self.sessionsDir) else { return }
             var currentSessions: [(session: SessionInfo, path: String)] = []
@@ -885,6 +898,35 @@ class SessionReader: ObservableObject {
         let disappeared = self.previousSessionFileIds.subtracting(currentFileIds)
         self.endedSessionIds.formUnion(disappeared)
         self.previousSessionFileIds = currentFileIds
+
+        // Clean up orphaned sidecar files (.context, .model) with no matching .json,
+        // and stale .lock directories. Only remove if older than 1 day.
+        let oneDayAgo = now.addingTimeInterval(-86400)
+        for file in files {
+            let isContext = file.hasSuffix(".context")
+            let isModel = file.hasSuffix(".model")
+            let isLock = file.hasSuffix(".lock")
+            guard isContext || isModel || isLock else { continue }
+
+            let baseName: String
+            if isContext {
+                baseName = String(file.dropLast(8))  // ".context"
+            } else if isModel {
+                baseName = String(file.dropLast(6))  // ".model"
+            } else {
+                baseName = String(file.dropLast(5))  // ".lock"
+            }
+
+            let jsonExists = fm.fileExists(atPath: "\(sessionsDir)/\(baseName).json")
+            guard !jsonExists else { continue }
+
+            let sidecarPath = "\(sessionsDir)/\(file)"
+            if let attrs = try? fm.attributesOfItem(atPath: sidecarPath),
+               let mtime = attrs[.modificationDate] as? Date,
+               mtime < oneDayAgo {
+                try? fm.removeItem(atPath: sidecarPath)
+            }
+        }
 
         // Load TTY → Ghostty UUID mapping
         let ttyMapPath = "\(monitorDir)/tty_map.json"
