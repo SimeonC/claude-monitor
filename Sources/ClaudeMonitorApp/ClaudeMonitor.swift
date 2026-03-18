@@ -138,12 +138,18 @@ class DirectoryWatcher {
     deinit { stop() }
 }
 
+// MARK: - Session Metadata (from JSONL head — static, cached across scan cycles)
+
+struct SessionMeta {
+    var isSubagent: Bool
+    var teamName: String?
+}
+
 // MARK: - Derived Session Data (in-memory, from JSONL scanning)
 
 struct DerivedSessionData {
     var project: String
     var cwd: String
-    var lastPrompt: String
     var agentCount: Int
     var jsonlMtime: Date?
     var jsonlBirthDate: Date?
@@ -176,8 +182,8 @@ class SessionReader: ObservableObject {
     /// TTY → Ghostty UUID mapping for click-to-switch (loaded from tty_map.json)
     private(set) var ttyMap: [String: String] = [:]
 
-    /// Team agent session IDs → team name (populated from JSONL scanning)
-    private var teamAgentSessions: [String: String] = [:]
+    /// Per-session static metadata from JSONL head (isSubagent, teamName). Persists across scan cycles.
+    private var sessionMetaCache: [String: SessionMeta] = [:]
 
     /// Reference to TeamReader for looking up team lead session IDs
     weak var teamReader: TeamReader? {
@@ -292,73 +298,41 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Read the tail of a JSONL file to extract cwd, latest user prompt, timestamp, and whether it's a subagent.
-    /// Reads up to 64KB to ensure large assistant responses don't push user messages out of the window.
-    private func readJSONLTail(path: String) -> (
-        cwd: String, prompt: String, timestamp: String?, isSubagent: Bool, teamName: String?
-    ) {
+    /// Read the head of a JSONL file (first 8KB) to extract static metadata: agentName and teamName.
+    /// These fields only appear in the first few records and never change during a session.
+    private func readJSONLHead(path: String) -> SessionMeta {
         guard let fileHandle = FileHandle(forReadingAtPath: path) else {
-            return ("", "", nil, false, nil)
+            return SessionMeta(isSubagent: false, teamName: nil)
         }
         defer { fileHandle.closeFile() }
 
-        let fileSize = fileHandle.seekToEndOfFile()
-        guard fileSize > 0 else { return ("", "", nil, false, nil) }
-        let readSize: UInt64 = min(fileSize, 65536)
-        fileHandle.seek(toFileOffset: fileSize - readSize)
-        let data = fileHandle.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return ("", "", nil, false, nil) }
+        let readSize: UInt64 = 8192
+        let data = fileHandle.readData(ofLength: Int(readSize))
+        guard let text = String(data: data, encoding: .utf8) else {
+            return SessionMeta(isSubagent: false, teamName: nil)
+        }
 
-        let lines = text.components(separatedBy: "\n")
-        var cwd = ""
-        var timestamp: String? = nil
         var isSubagent = false
         var teamName: String? = nil
 
+        let lines = text.components(separatedBy: "\n")
         for line in lines {
             guard !line.isEmpty,
                 let lineData = line.data(using: .utf8),
                 let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
             else { continue }
 
-            if let ts = json["timestamp"] as? String {
-                timestamp = ts
-            }
-            if let c = json["cwd"] as? String, !c.isEmpty {
-                cwd = c
-            }
             if json["agentName"] != nil {
                 isSubagent = true
             }
             if let tn = json["teamName"] as? String, !tn.isEmpty {
                 teamName = tn
             }
+            // Once we have what we need, stop
+            if isSubagent && teamName != nil { break }
         }
 
-        // Search backwards for the last non-blank, non-skipped user message
-        var prompt = ""
-        for line in lines.reversed() {
-            guard !line.isEmpty,
-                let lineData = line.data(using: .utf8),
-                let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
-            else { continue }
-
-            if let type = json["type"] as? String, type == "user",
-                !isSubagent,
-                let message = json["message"] as? [String: Any],
-                let content = message["content"] as? String,
-                !content.hasPrefix("<teammate-message"),
-                !content.hasPrefix("<local-command"),
-                !content.hasPrefix("<command-name>"),
-                !content.hasPrefix("<task-notification>"),
-                !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            {
-                prompt = String(content.prefix(200))
-                break
-            }
-        }
-
-        return (cwd, prompt, timestamp, isSubagent, teamName)
+        return SessionMeta(isSubagent: isSubagent, teamName: teamName)
     }
 
     /// Find the JSONL file path for a session ID by scanning project directories.
@@ -375,6 +349,7 @@ class SessionReader: ObservableObject {
     }
 
     /// Scan `~/.claude/projects/` JSONL files to populate in-memory derivedData.
+    /// Static subagent/teamName metadata is read from the JSONL head and cached in sessionMetaCache.
     /// No session files are written — readSessions() merges this data at display time.
     func scanProjects() {
         guard !scanQueued else { return }
@@ -388,14 +363,6 @@ class SessionReader: ObservableObject {
             let twoMinAgo = now.addingTimeInterval(-120)
 
             var newDerived: [String: DerivedSessionData] = [:]
-            // Carry forward known team agents whose session files still exist
-            var newTeamAgents: [String: String] = [:]
-            for (sid, teamName) in self.teamAgentSessions {
-                if fm.fileExists(atPath: "\(self.sessionsDir)/\(sid).json"),
-                   !self.endedSessionIds.contains(sid) {
-                    newTeamAgents[sid] = teamName
-                }
-            }
 
             for projectDir in projectDirs {
                 let projectPath = "\(self.projectsDir)/\(projectDir)"
@@ -414,38 +381,38 @@ class SessionReader: ObservableObject {
 
                     let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
-                    // For stale files: only read tail if already known as a team agent (to maintain linking).
-                    // Fresh files always get their tail read.
-                    let needsTailRead = isFresh || self.teamAgentSessions[sessionId] != nil
-                    guard needsTailRead else { continue }
-
-                    let (cwd, lastPrompt, _, isSubagent, teamName) = self.readJSONLTail(path: jsonlPath)
-
-                    // Track team agent sessions for parent linking (from both fresh and stale files)
-                    if isSubagent, let tn = teamName {
-                        newTeamAgents[sessionId] = tn
+                    // Read static metadata from head if not already cached
+                    let meta: SessionMeta
+                    if let cached = self.sessionMetaCache[sessionId] {
+                        meta = cached
+                    } else {
+                        meta = self.readJSONLHead(path: jsonlPath)
+                        self.sessionMetaCache[sessionId] = meta
                     }
 
-                    // Skip subagent sessions — but allow stale files for display if they're not subagents
-                    if isSubagent { continue }
+                    // Skip subagent sessions entirely
+                    if meta.isSubagent { continue }
 
                     // Only populate derivedData from fresh files
                     if !isFresh { continue }
 
-                    // No cwd in tail → can't determine project, skip
-                    if cwd.isEmpty { continue }
-
-                    // If the new CWD is a subdirectory of a previously cached CWD,
-                    // keep the original — prevents title flickering after `cd` in Bash
-                    let existingCwd = self.derivedData[sessionId]?.cwd ?? ""
-                    let effectiveCwd: String
-                    if !existingCwd.isEmpty && cwd.hasPrefix(existingCwd + "/") {
-                        effectiveCwd = existingCwd
-                    } else {
-                        effectiveCwd = cwd
+                    // cwd comes from session JSON (written by hook at SessionStart).
+                    // Use previously cached cwd if we have one; otherwise derive from session file.
+                    let sessionFilePath = "\(self.sessionsDir)/\(sessionId).json"
+                    var cwd = self.derivedData[sessionId]?.cwd ?? ""
+                    if cwd.isEmpty,
+                       let data = fm.contents(atPath: sessionFilePath),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let sessionCwd = json["cwd"] as? String,
+                       !sessionCwd.isEmpty
+                    {
+                        cwd = sessionCwd
                     }
 
-                    let project = (effectiveCwd as NSString).lastPathComponent
+                    // Skip if still no cwd (session file not yet written)
+                    if cwd.isEmpty { continue }
+
+                    let project = (cwd as NSString).lastPathComponent
 
                     // Count active subagents
                     let subagentsDir = "\(projectPath)/\(sessionId)/subagents"
@@ -462,16 +429,10 @@ class SessionReader: ObservableObject {
                         }
                     }
 
-                    // Preserve previously cached prompt when JSONL tail doesn't contain one
-                    let effectivePrompt = lastPrompt.isEmpty
-                        ? (self.derivedData[sessionId]?.lastPrompt ?? "")
-                        : lastPrompt
-
                     let birthDate = attrs[.creationDate] as? Date
                     newDerived[sessionId] = DerivedSessionData(
                         project: project,
-                        cwd: effectiveCwd,
-                        lastPrompt: effectivePrompt,
+                        cwd: cwd,
                         agentCount: agentCount,
                         jsonlMtime: mtime,
                         jsonlBirthDate: birthDate,
@@ -481,7 +442,15 @@ class SessionReader: ObservableObject {
             }
 
             self.derivedData = newDerived
-            self.teamAgentSessions = newTeamAgents
+
+            // Clean up meta cache for sessions that no longer have JSONL files
+            let activeIds = Set(newDerived.keys)
+            for sid in Array(self.sessionMetaCache.keys) {
+                if !activeIds.contains(sid),
+                   !fm.fileExists(atPath: "\(self.sessionsDir)/\(sid).json") {
+                    self.sessionMetaCache.removeValue(forKey: sid)
+                }
+            }
         }
     }
 
@@ -873,14 +842,12 @@ class SessionReader: ObservableObject {
                    !modelStr.isEmpty {
                     session.model = modelStr
                 }
-                // Enrich with JSONL-derived data (project, cwd, last_prompt, agent_count)
+                // Enrich with JSONL-derived data (project, cwd, agent_count)
+                // last_prompt is now authoritative from the session JSON (written by hook at UserPromptSubmit)
                 if let derived = derivedData[session.session_id] {
                     if session.project == "unknown" || session.cwd.isEmpty {
                         session.project = derived.project
                         session.cwd = derived.cwd
-                    }
-                    if !derived.lastPrompt.isEmpty {
-                        session.last_prompt = derived.lastPrompt
                     }
                     session.agent_count = derived.agentCount
                 }
@@ -953,16 +920,17 @@ class SessionReader: ObservableObject {
                 project: derived.project, cwd: derived.cwd,
                 terminal: "", terminal_session_id: "",
                 started_at: startedAtString, updated_at: nowString,
-                last_prompt: derived.lastPrompt,
+                last_prompt: "",
                 agent_count: derived.agentCount
             )
             loaded.append(session)
         }
 
-        // --- Team agent linking: set parent_session_id from JSONL teamName ---
+        // --- Team agent linking: set parent_session_id from meta cache teamName ---
         for i in loaded.indices {
-            if let teamName = self.teamAgentSessions[loaded[i].session_id],
-               let leadSid = teamLeadsByName[teamName] {
+            if let teamName = self.sessionMetaCache[loaded[i].session_id]?.teamName,
+               let leadSid = teamLeadsByName[teamName],
+               loadedIds.contains(leadSid) {
                 loaded[i].parent_session_id = leadSid
                 NSLog("[ClaudeMonitor] Linked agent %@ (team: %@) → lead %@",
                       loaded[i].session_id, teamName, leadSid)

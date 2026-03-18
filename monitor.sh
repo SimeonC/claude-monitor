@@ -200,7 +200,14 @@ if [ "$IS_SUBAGENT" = "true" ]; then
                     fi
                 fi
                 ;;
-            PreToolUse|PostToolUse|PostToolUseFailure|UserPromptSubmit)
+            UserPromptSubmit)
+                PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' | head -c 200)
+                if [ -f "$SESSION_FILE" ]; then
+                    update_json_file "$SESSION_FILE" --arg updated "$NOW" --arg prompt "$PROMPT" \
+                        'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end | if $prompt != "" then .last_prompt = $prompt else . end'
+                fi
+                ;;
+            PreToolUse|PostToolUse|PostToolUseFailure)
                 if [ -f "$SESSION_FILE" ]; then
                     update_json_file "$SESSION_FILE" --arg updated "$NOW" \
                         'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
@@ -541,9 +548,22 @@ case "$EVENT" in
             'if .status == "dead" or .status == "idle" then .updated_at = $updated elif .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
         ;;
 
-    UserPromptSubmit|PostToolUse|PostToolUseFailure)
-        # User submitted prompt or tool completed — clear attention and set working.
-        # PostToolUse/PostToolUseFailure means user answered any permission prompt; UserPromptSubmit means user is active.
+    UserPromptSubmit)
+        # User submitted prompt — set working and persist last_prompt
+        ensure_session_file
+        backfill_terminal
+        PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' | head -c 200)
+        if [ -f "$SESSION_FILE" ]; then
+            update_json_file "$SESSION_FILE" \
+                --arg updated "$NOW" \
+                --arg prompt "$PROMPT" \
+                'if .status == "dead" then . else .status = "working" | .updated_at = $updated | if $prompt != "" then .last_prompt = $prompt else . end end'
+        fi
+        ;;
+
+    PostToolUse|PostToolUseFailure)
+        # Tool completed — clear attention and set working.
+        # PostToolUse/PostToolUseFailure means user answered any permission prompt.
         ensure_session_file
         backfill_terminal
         if [ -f "$SESSION_FILE" ]; then
