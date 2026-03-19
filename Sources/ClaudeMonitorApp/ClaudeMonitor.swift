@@ -9,6 +9,8 @@ class TeamReader: ObservableObject {
     @Published var teamsBySession: [String: TeamInfo] = [:]
     @Published var leadSessionByTeamName: [String: String] = [:]
     private var watcher: DirectoryWatcher?
+    private var knownTeamNames: Set<String> = []
+    var onTeamsRemoved: ((Set<String>) -> Void)?
 
     private let teamsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -70,6 +72,11 @@ class TeamReader: ObservableObject {
                 tasks: tasks
             )
         }
+
+        let currentNames = Set(nameMap.keys)
+        let removed = knownTeamNames.subtracting(currentNames)
+        knownTeamNames = currentNames
+        if !removed.isEmpty { onTeamsRemoved?(removed) }
 
         DispatchQueue.main.async {
             self.teamsBySession = result
@@ -188,6 +195,9 @@ class SessionReader: ObservableObject {
     /// Reference to TeamReader for looking up team lead session IDs
     weak var teamReader: TeamReader? {
         didSet {
+            teamReader?.onTeamsRemoved = { [weak self] removed in
+                self?.cleanupTeamAgentSessions(teamNames: removed)
+            }
             if teamReader != nil { readSessions() }
         }
     }
@@ -767,6 +777,30 @@ class SessionReader: ObservableObject {
                 } else {
                     debugLog("relink: failed to serialize tty_map.json")
                 }
+            }
+        }
+    }
+
+    /// Delete session files for team agent sessions whose team has been removed.
+    func cleanupTeamAgentSessions(teamNames: Set<String>) {
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            var toRemove: [String] = []
+            for (sid, meta) in self.sessionMetaCache {
+                if let tn = meta.teamName, teamNames.contains(tn) {
+                    toRemove.append(sid)
+                }
+            }
+            for sid in toRemove {
+                try? fm.removeItem(atPath: "\(self.sessionsDir)/\(sid).json")
+                try? fm.removeItem(atPath: "\(self.sessionsDir)/\(sid).context")
+                try? fm.removeItem(atPath: "\(self.sessionsDir)/\(sid).model")
+                self.sessionMetaCache.removeValue(forKey: sid)
+                debugLog("Cleaned up orphaned team agent session \(sid)")
+            }
+            if !toRemove.isEmpty {
+                self._readSessionsOnIOQueue(teamLeadsByName: self.teamReader?.leadSessionByTeamName ?? [:])
             }
         }
     }
