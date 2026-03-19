@@ -4,12 +4,12 @@ import Foundation
 
 public struct TeamMember: Codable {
     public let name: String
-    public let agentType: String
+    public let agentType: String?
     public let model: String?
     public let color: String?
     public let isActive: Bool?
 
-    public init(name: String, agentType: String, model: String? = nil, color: String? = nil, isActive: Bool? = nil) {
+    public init(name: String, agentType: String? = nil, model: String? = nil, color: String? = nil, isActive: Bool? = nil) {
         self.name = name
         self.agentType = agentType
         self.model = model

@@ -269,6 +269,9 @@ seed_tty_map() {
 
     [ -n "$uuid" ] || return 0
 
+    # Export resolved UUID for session JSON
+    GHOSTTY_RESOLVED_UUID="$uuid"
+
     # Write tty_map.json (TTY → UUID)
     local existing="{}"
     [ -f "$map_file" ] && existing=$(cat "$map_file" 2>/dev/null || echo "{}")
@@ -295,6 +298,7 @@ if [ "$IS_SUBAGENT" = "true" ]; then
         # Team agent: use own session file with parent_session_id set
         case "$EVENT" in
             SessionStart)
+                GHOSTTY_RESOLVED_UUID=""
                 seed_tty_map
                 jq -n \
                     --arg sid "$SESSION_ID" \
@@ -304,8 +308,9 @@ if [ "$IS_SUBAGENT" = "true" ]; then
                     --arg terminal "$TERM_APP" \
                     --arg term_sid "$TERM_SID" \
                     --arg parent "$PARENT_SESSION_ID" \
+                    --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent}' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
                 ;;
             Notification)
@@ -447,6 +452,7 @@ case "$EVENT" in
             done
         fi
         cleanup_same_terminal
+        GHOSTTY_RESOLVED_UUID=""
         seed_tty_map
         # Detect --dangerously-skip-permissions once at session start.
         # Fallback: devcontainer sessions always run with skip-permissions (injected by claude.fish).
@@ -465,6 +471,11 @@ case "$EVENT" in
                     --arg updated "$NOW" \
                     '.status = $status | .updated_at = $updated'
             fi
+            # Persist ghostty_terminal_id if resolved
+            if [ -n "$GHOSTTY_RESOLVED_UUID" ]; then
+                update_json_file "$SESSION_FILE" --arg gid "$GHOSTTY_RESOLVED_UUID" \
+                    '.ghostty_terminal_id = $gid'
+            fi
             # Persist skip_permissions flag (clear if not detected)
             if [ "$SKIP_PERMS" = "true" ]; then
                 update_json_file "$SESSION_FILE" '.skip_permissions = true'
@@ -481,8 +492,9 @@ case "$EVENT" in
                     --arg cwd "${CWD:-}" \
                     --arg terminal "$TERM_APP" \
                     --arg term_sid "$TERM_SID" \
+                    --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, skip_permissions: true}' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, skip_permissions: true} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
             else
                 jq -n \
@@ -492,8 +504,9 @@ case "$EVENT" in
                     --arg cwd "${CWD:-}" \
                     --arg terminal "$TERM_APP" \
                     --arg term_sid "$TERM_SID" \
+                    --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0}' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
             fi
         fi

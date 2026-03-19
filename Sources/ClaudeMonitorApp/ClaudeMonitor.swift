@@ -1056,6 +1056,7 @@ class SessionReader: ObservableObject {
             if let pct = s.context_pct { d["context_pct"] = pct }
             if let m = s.model { d["model"] = m }
             if s.skip_permissions == true { d["skip_permissions"] = true }
+            if let gid = s.ghostty_terminal_id { d["ghostty_terminal_id"] = gid }
             if s.agent_count > 0 { d["agent_count"] = s.agent_count }
             if let parent = s.parent_session_id { d["parent_session_id"] = parent }
             return d
@@ -1091,6 +1092,8 @@ class ActiveSessionTracker: ObservableObject {
     private var lastActiveTTY: String?
     private var lastActiveTTYTime: Date?
     private let backgroundQueue = DispatchQueue(label: "com.claudemonitor.activesession", qos: .utility)
+
+    private var lastFocusedUUID: String?        // cached focused UUID to skip redundant matching
 
     private let terminalBundleIds: Set<String> = [
         "com.mitchellh.ghostty",
@@ -1134,6 +1137,7 @@ class ActiveSessionTracker: ObservableObject {
             return
         }
         if terminalBundleIds.contains(bundleId) {
+            lastFocusedUUID = nil  // force re-check on app switch
             startPolling()
         } else {
             stopPolling()
@@ -1203,29 +1207,90 @@ class ActiveSessionTracker: ObservableObject {
     }
 
     private func detectGhosttySession(app: NSRunningApplication, sessions: [SessionInfo]) {
-        let script = "tell application \"Ghostty\" to return id of focused terminal of selected tab of front window"
+        let script = """
+            tell application "Ghostty"
+                set t to focused terminal of selected tab of front window
+                return (id of t) & "|" & (name of selected tab of front window)
+            end tell
+            """
         backgroundQueue.async { [weak self] in
             guard let self = self else { return }
             guard let appleScript = NSAppleScript(source: script) else { return }
             var error: NSDictionary?
             let result = appleScript.executeAndReturnError(&error)
-            guard error == nil, let focusedUUID = result.stringValue else {
-                DispatchQueue.main.async { self.activeSessionId = nil }
+            guard error == nil, let rawResult = result.stringValue else {
+                DispatchQueue.main.async {
+                    self.lastFocusedUUID = nil
+                    self.activeSessionId = nil
+                }
                 return
             }
+
+            // Parse "uuid|tabName" — defensively handle missing separator
+            let focusedUUID: String
+            let tabName: String?
+            if let sepIndex = rawResult.firstIndex(of: "|") {
+                focusedUUID = String(rawResult[rawResult.startIndex..<sepIndex])
+                let afterSep = rawResult.index(after: sepIndex)
+                tabName = afterSep < rawResult.endIndex ? String(rawResult[afterSep...]) : nil
+            } else {
+                focusedUUID = rawResult
+                tabName = nil
+            }
+
+            // Skip matching work if focused UUID hasn't changed
+            if focusedUUID == self.lastFocusedUUID,
+               let currentId = self.activeSessionId,
+               sessions.contains(where: { $0.session_id == currentId }) {
+                return
+            }
+
             let ghosttySessions = sessions.filter { $0.terminal == "ghostty" }
-            debugLog("detectGhostty: focused=\(focusedUUID) ghosttySessions=\(ghosttySessions.map { "\($0.session_id)=\($0.terminal_session_id)" }.joined(separator: ", "))")
+            debugLog("detectGhostty: focused=\(focusedUUID) tab=\(tabName ?? "nil") ghosttySessions=\(ghosttySessions.map { "\($0.session_id)=\($0.terminal_session_id) gid=\($0.ghostty_terminal_id ?? "nil")" }.joined(separator: ", "))")
 
-            // Find ALL TTYs that map to this UUID (multiple tmux panes share one Ghostty tab)
-            let ttyMap = self.sessionReader?.ttyMap ?? [:]
-            let matchedTTYs = Set(ttyMap.filter { $0.value == focusedUUID }.map { $0.key })
+            // Primary: direct ghostty_terminal_id match
+            var candidates = ghosttySessions.filter { $0.ghostty_terminal_id == focusedUUID }
 
-            // Find all sessions matching via TTY
-            var candidates = ghosttySessions.filter { matchedTTYs.contains($0.terminal_session_id) }
-            // Backward compat: direct UUID match for old sessions
-            let candidateIds = Set(candidates.map { $0.session_id })
-            candidates += ghosttySessions.filter {
-                $0.terminal_session_id == focusedUUID && !candidateIds.contains($0.session_id)
+            if candidates.isEmpty {
+                // Fallback: ttyMap reverse-lookup (old sessions without ghostty_terminal_id)
+                let ttyMap = self.sessionReader?.ttyMap ?? [:]
+                let matchedTTYs = Set(ttyMap.filter { $0.value == focusedUUID }.map { $0.key })
+                candidates = ghosttySessions.filter { matchedTTYs.contains($0.terminal_session_id) }
+
+                // Backward compat: direct UUID in terminal_session_id
+                let candidateIds = Set(candidates.map { $0.session_id })
+                candidates += ghosttySessions.filter {
+                    $0.terminal_session_id == focusedUUID && !candidateIds.contains($0.session_id)
+                }
+            }
+
+            // Final fallback: match by tab title parsed as CWD
+            if candidates.isEmpty, let tabName = tabName, !tabName.isEmpty {
+                let home = NSHomeDirectory()
+                // Normalize tab name to absolute path — fish sets tab title to CWD
+                var cwdCandidates: [String] = []
+                if tabName.hasPrefix("~") {
+                    cwdCandidates.append(home + tabName.dropFirst())
+                } else if tabName.hasPrefix("/") {
+                    cwdCandidates.append(tabName)
+                }
+                // Tab name may contain "fish ~/path" — try space-separated tokens
+                for token in tabName.split(separator: " ").map(String.init) {
+                    if token.hasPrefix("~") {
+                        cwdCandidates.append(home + token.dropFirst())
+                    } else if token.hasPrefix("/") {
+                        cwdCandidates.append(token)
+                    }
+                }
+                for tabCWD in cwdCandidates {
+                    candidates = ghosttySessions.filter {
+                        $0.cwd == tabCWD || $0.cwd.hasPrefix(tabCWD + "/")
+                    }
+                    if !candidates.isEmpty { break }
+                }
+                if !candidates.isEmpty {
+                    debugLog("detectGhostty: CWD fallback matched via tab name '\(tabName)'")
+                }
             }
 
             debugLog("detectGhostty: candidates=\(candidates.map { "\($0.session_id)(\($0.status))" }.joined(separator: ", "))")
@@ -1240,7 +1305,10 @@ class ActiveSessionTracker: ObservableObject {
                 if pa != pb { return pa < pb }
                 return a.updated_at < b.updated_at
             }
-            DispatchQueue.main.async { self.activeSessionId = best?.session_id }
+            DispatchQueue.main.async {
+                self.lastFocusedUUID = focusedUUID
+                self.activeSessionId = best?.session_id
+            }
         }
     }
 
@@ -1381,11 +1449,14 @@ func switchToTerminal(ttyPath: String) {
 
 func switchToGhostty(session: SessionInfo, ttyMap: [String: String]) {
     let tty = session.terminal_session_id
-    debugLog("switchToGhostty: tty=\(tty)")
+    debugLog("switchToGhostty: tty=\(tty) ghostty_terminal_id=\(session.ghostty_terminal_id ?? "nil")")
 
-    // Resolve UUID: forward lookup through ttyMap, or direct if already a UUID (backward compat)
+    // Primary: use stored ghostty_terminal_id
+    // Fallback: ttyMap lookup, or direct UUID in terminal_session_id (backward compat)
     var uuid: String?
-    if let mapped = ttyMap[tty] {
+    if let gid = session.ghostty_terminal_id, !gid.isEmpty {
+        uuid = gid
+    } else if let mapped = ttyMap[tty] {
         uuid = mapped
     } else if tty.contains("-") {
         // Old session with UUID directly in terminal_session_id
