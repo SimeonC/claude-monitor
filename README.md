@@ -82,6 +82,28 @@ devcontainer exec --remote-env "GHOSTTY_TERMINAL_UUID=$TERM_UUID" -- claude
 
 The monitor hook checks for this variable first and uses it directly, skipping the AppleScript call.
 
+#### Tmux + Ghostty
+
+If you run Claude inside tmux panes within Ghostty tabs, add a small shell snippet that captures the Ghostty terminal UUID when the tab opens. This gives the monitor a reliable mapping from tmux panes to Ghostty tabs — without it, multiple panes (different TTYs) can get mapped to the wrong tab.
+
+**Fish** — save as `~/.config/fish/conf.d/ghostty-uuid.fish`:
+
+```fish
+if test -n "$GHOSTTY_RESOURCES_DIR"; and not set -q GHOSTTY_TERMINAL_UUID
+    set -gx GHOSTTY_TERMINAL_UUID (osascript -e 'tell application "Ghostty" to return id of focused terminal of selected tab of front window' 2>/dev/null)
+end
+```
+
+**Zsh** — add to `~/.zshrc`:
+
+```zsh
+if [[ -n "$GHOSTTY_RESOURCES_DIR" && -z "$GHOSTTY_TERMINAL_UUID" ]]; then
+    export GHOSTTY_TERMINAL_UUID=$(osascript -e 'tell application "Ghostty" to return id of focused terminal of selected tab of front window' 2>/dev/null)
+fi
+```
+
+The UUID is captured once when the Ghostty tab opens (when it's definitively focused). The "not already set" guard prevents child shells (including tmux panes) from re-capturing a different value. Without this config, the monitor still works via tmux session mapping and focused-terminal fallback, but the env var is the most reliable strategy.
+
 ### Uninstall
 
 ```bash

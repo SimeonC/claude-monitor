@@ -172,20 +172,140 @@ ensure_subagent_file() {
     return 0
 }
 
+# --- Detect terminal + session ID for click-to-switch ---
+# Returns "app|tty_path" — TTY is always the identity (stable across restarts).
+# Ghostty UUID mapping lives in tty_map.json (see seed_tty_map).
+detect_terminal() {
+    local tty_id=""
+    local pid=$$
+    for _ in 1 2 3 4 5; do
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -z "$pid" ] || [ "$pid" = "1" ] && break
+        local t
+        t=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [ -n "$t" ] && [ "$t" != "??" ]; then
+            tty_id="/dev/$t"; break
+        fi
+    done
+    [ -n "${DEVCONTAINER:-}" ] && [ -n "$tty_id" ] && tty_id="$(hostname):$tty_id"
+
+    if [ -n "${ITERM_SESSION_ID:-}" ]; then echo "iterm2|$tty_id"
+    elif [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then echo "ghostty|$tty_id"
+    elif [ -n "$tty_id" ]; then echo "terminal|$tty_id"
+    else echo "|"
+    fi
+}
+
+# --- Cached live Ghostty UUID helper (one osascript call per hook invocation) ---
+_LIVE_GHOSTTY_UUIDS=""
+_LIVE_GHOSTTY_UUIDS_FETCHED=false
+
+get_live_ghostty_uuids() {
+    if $_LIVE_GHOSTTY_UUIDS_FETCHED; then
+        echo "$_LIVE_GHOSTTY_UUIDS"
+        return
+    fi
+    _LIVE_GHOSTTY_UUIDS_FETCHED=true
+    _LIVE_GHOSTTY_UUIDS=$(osascript -e '
+        tell application "Ghostty"
+            set output to ""
+            repeat with w in every window
+                repeat with t in every tab of w
+                    set term to focused terminal of t
+                    set output to output & id of term & linefeed
+                end repeat
+            end repeat
+            return output
+        end tell' 2>/dev/null | tr -d '\r')
+    echo "$_LIVE_GHOSTTY_UUIDS"
+}
+
+# --- Seed tty_map.json + tmux_map.json: TTY/tmux → Ghostty UUID mapping ---
+# Called at SessionStart. Priority: env var → tmux_map → staleness-checked tty_map → focused terminal.
+seed_tty_map() {
+    [ "$TERM_APP" = "ghostty" ] || return 0
+    [ -n "$TERM_SID" ] || return 0
+    local map_file="$MONITOR_DIR/tty_map.json"
+    local tmux_map_file="$MONITOR_DIR/tmux_map.json"
+    local uuid=""
+
+    # Detect tmux session name
+    local tmux_session=""
+    if [ -n "${TMUX:-}" ]; then
+        tmux_session=$(tmux display-message -p '#S' 2>/dev/null)
+    fi
+
+    # 1. GHOSTTY_TERMINAL_UUID env var (set by shell config — always correct)
+    if [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then
+        uuid="$GHOSTTY_TERMINAL_UUID"
+    fi
+
+    # 2. Existing tmux_map.json entry for this tmux session (verified live)
+    if [ -z "$uuid" ] && [ -n "$tmux_session" ] && [ -f "$tmux_map_file" ]; then
+        local tmux_uuid
+        tmux_uuid=$(jq -r --arg ts "$tmux_session" '.[$ts] // empty' "$tmux_map_file" 2>/dev/null)
+        if [ -n "$tmux_uuid" ]; then
+            if get_live_ghostty_uuids | grep -qF "$tmux_uuid"; then
+                uuid="$tmux_uuid"
+            fi
+        fi
+    fi
+
+    # 3. Staleness-checked existing TTY mapping from tty_map.json
+    if [ -z "$uuid" ] && [ -f "$map_file" ]; then
+        local existing_uuid
+        existing_uuid=$(jq -r --arg tty "$TERM_SID" '.[$tty] // empty' "$map_file" 2>/dev/null)
+        if [ -n "$existing_uuid" ]; then
+            if get_live_ghostty_uuids | grep -qF "$existing_uuid"; then
+                uuid="$existing_uuid"
+            fi
+        fi
+    fi
+
+    # 4. Focused terminal via osascript (reliable at SessionStart)
+    if [ -z "$uuid" ]; then
+        uuid=$(osascript -e 'tell application "Ghostty" to return id of focused terminal of selected tab of front window' 2>/dev/null)
+    fi
+
+    [ -n "$uuid" ] || return 0
+
+    # Write tty_map.json (TTY → UUID)
+    local existing="{}"
+    [ -f "$map_file" ] && existing=$(cat "$map_file" 2>/dev/null || echo "{}")
+    echo "$existing" | jq --arg tty "$TERM_SID" --arg uuid "$uuid" \
+        '.[$tty] = $uuid' > "${map_file}.tmp" && mv "${map_file}.tmp" "$map_file"
+
+    # Write tmux_map.json (tmux_session → UUID) if in tmux
+    if [ -n "$tmux_session" ]; then
+        local tmux_existing="{}"
+        [ -f "$tmux_map_file" ] && tmux_existing=$(cat "$tmux_map_file" 2>/dev/null || echo "{}")
+        echo "$tmux_existing" | jq --arg ts "$tmux_session" --arg uuid "$uuid" \
+            '.[$ts] = $uuid' > "${tmux_map_file}.tmp" && mv "${tmux_map_file}.tmp" "$tmux_map_file"
+    fi
+}
+
+# --- Detect terminal once for all events ---
+TERM_INFO=$(detect_terminal)
+TERM_APP=$(echo "$TERM_INFO" | cut -d'|' -f1)
+TERM_SID=$(echo "$TERM_INFO" | cut -d'|' -f2)
+
 # --- Sub-agent event handling ---
 if [ "$IS_SUBAGENT" = "true" ]; then
     if [ "${IS_TEAM_AGENT:-false}" = "true" ]; then
         # Team agent: use own session file with parent_session_id set
         case "$EVENT" in
             SessionStart)
+                seed_tty_map
                 jq -n \
                     --arg sid "$SESSION_ID" \
                     --arg status "working" \
                     --arg project "$PROJECT" \
                     --arg cwd "${CWD:-}" \
+                    --arg terminal "$TERM_APP" \
+                    --arg term_sid "$TERM_SID" \
                     --arg parent "$PARENT_SESSION_ID" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: "", terminal_session_id: "", started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent}' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent}' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
                 ;;
             Notification)
@@ -253,106 +373,6 @@ if [ "$IS_SUBAGENT" = "true" ]; then
     fi
     exit 0
 fi
-
-# --- Detect terminal + session ID for click-to-switch ---
-# Returns "app|tty_path" — TTY is always the identity (stable across restarts).
-# Ghostty UUID mapping lives in tty_map.json (see seed_tty_map).
-detect_terminal() {
-    local tty_id=""
-    local pid=$$
-    for _ in 1 2 3 4 5; do
-        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-        [ -z "$pid" ] || [ "$pid" = "1" ] && break
-        local t
-        t=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
-        if [ -n "$t" ] && [ "$t" != "??" ]; then
-            tty_id="/dev/$t"; break
-        fi
-    done
-    [ -n "${DEVCONTAINER:-}" ] && [ -n "$tty_id" ] && tty_id="$(hostname):$tty_id"
-
-    if [ -n "${ITERM_SESSION_ID:-}" ]; then echo "iterm2|$tty_id"
-    elif [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then echo "ghostty|$tty_id"
-    elif [ -n "$tty_id" ]; then echo "terminal|$tty_id"
-    else echo "|"
-    fi
-}
-
-# --- Seed tty_map.json: TTY → Ghostty UUID mapping for click-to-switch ---
-# Called at SessionStart. Enumerates Ghostty terminals to find which UUID owns this TTY.
-seed_tty_map() {
-    [ "$TERM_APP" = "ghostty" ] || return 0
-    [ -n "$TERM_SID" ] || return 0
-    local map_file="$MONITOR_DIR/tty_map.json"
-
-    # Don't overwrite existing mapping for this TTY
-    if [ -f "$map_file" ] && jq -e --arg tty "$TERM_SID" 'has($tty)' "$map_file" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    local uuid=""
-    local project_base
-    project_base=$(basename "${CWD:-}")
-
-    # Enumerate all Ghostty terminals
-    if [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then
-        local enum
-        enum=$(osascript -e '
-            tell application "Ghostty"
-                set output to ""
-                repeat with w in every window
-                    repeat with t in every tab of w
-                        set term to focused terminal of t
-                        set output to output & id of term & tab character & working directory of term & linefeed
-                    end repeat
-                end repeat
-                return output
-            end tell' 2>/dev/null)
-
-        if [ -n "$enum" ]; then
-            # Load existing map to check which UUIDs are already mapped
-            local existing="{}"
-            [ -f "$map_file" ] && existing=$(cat "$map_file" 2>/dev/null || echo "{}")
-            local mapped_uuids
-            mapped_uuids=$(echo "$existing" | jq -r '[.[]] | join("\n")' 2>/dev/null)
-
-            # Try exact CWD match first, then basename match
-            local candidate="" fallback=""
-            while IFS=$'\t' read -r tid tcwd; do
-                [ -n "$tid" ] || continue
-                local match=false
-                if [ "$tcwd" = "$CWD" ]; then
-                    match=true
-                elif [ -n "$project_base" ] && [ "$(basename "$tcwd")" = "$project_base" ]; then
-                    match=true
-                fi
-                $match || continue
-                # Prefer UUIDs not already in map
-                if ! echo "$mapped_uuids" | grep -qF "$tid"; then
-                    candidate="$tid"; break
-                fi
-                [ -z "$fallback" ] && fallback="$tid"
-            done <<< "$enum"
-            uuid="${candidate:-$fallback}"
-        fi
-    fi
-
-    # Fallbacks
-    [ -z "$uuid" ] && [ -n "${GHOSTTY_TERMINAL_UUID:-}" ] && uuid="$GHOSTTY_TERMINAL_UUID"
-    [ -z "$uuid" ] && uuid=$(osascript -e 'tell application "Ghostty" to return id of focused terminal of selected tab of front window' 2>/dev/null)
-    [ -n "$uuid" ] || return 0
-
-    # Atomic update
-    local existing="{}"
-    [ -f "$map_file" ] && existing=$(cat "$map_file" 2>/dev/null || echo "{}")
-    echo "$existing" | jq --arg tty "$TERM_SID" --arg uuid "$uuid" \
-        '.[$tty] = $uuid' > "${map_file}.tmp" && mv "${map_file}.tmp" "$map_file"
-}
-
-# --- Detect terminal once for all events ---
-TERM_INFO=$(detect_terminal)
-TERM_APP=$(echo "$TERM_INFO" | cut -d'|' -f1)
-TERM_SID=$(echo "$TERM_INFO" | cut -d'|' -f2)
 
 # Helper: create session file if missing or corrupt (hooks bootstrap it on first event after monitor restart)
 ensure_session_file() {

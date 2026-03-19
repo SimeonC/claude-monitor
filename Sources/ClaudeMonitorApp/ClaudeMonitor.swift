@@ -188,6 +188,8 @@ class SessionReader: ObservableObject {
 
     /// TTY → Ghostty UUID mapping for click-to-switch (loaded from tty_map.json)
     private(set) var ttyMap: [String: String] = [:]
+    /// Tmux session name → Ghostty UUID mapping (loaded from tmux_map.json)
+    private(set) var tmuxMap: [String: String] = [:]
 
     /// Per-session static metadata from JSONL head (isSubagent, teamName). Persists across scan cycles.
     private var sessionMetaCache: [String: SessionMeta] = [:]
@@ -936,6 +938,13 @@ class SessionReader: ObservableObject {
             self.ttyMap = decoded
         }
 
+        // Load tmux session → Ghostty UUID mapping
+        let tmuxMapPath = "\(monitorDir)/tmux_map.json"
+        if let tmuxMapData = fm.contents(atPath: tmuxMapPath),
+           let decoded = try? JSONSerialization.jsonObject(with: tmuxMapData) as? [String: String] {
+            self.tmuxMap = decoded
+        }
+
         // Recovery: for derivedData entries with active JSONL but no session file,
         // create in-memory SessionInfo (monitor restart recovery / session file not yet written).
         // derivedData only holds JSONL modified within the last 2 minutes, so any entry here
@@ -1207,19 +1216,31 @@ class ActiveSessionTracker: ObservableObject {
             let ghosttySessions = sessions.filter { $0.terminal == "ghostty" }
             debugLog("detectGhostty: focused=\(focusedUUID) ghosttySessions=\(ghosttySessions.map { "\($0.session_id)=\($0.terminal_session_id)" }.joined(separator: ", "))")
 
-            // Reverse lookup: find which TTY maps to this UUID via ttyMap
+            // Find ALL TTYs that map to this UUID (multiple tmux panes share one Ghostty tab)
             let ttyMap = self.sessionReader?.ttyMap ?? [:]
-            let matchedTTY = ttyMap.first { $0.value == focusedUUID }?.key
+            let matchedTTYs = Set(ttyMap.filter { $0.value == focusedUUID }.map { $0.key })
 
-            var matched: SessionInfo?
-            if let tty = matchedTTY {
-                matched = sessions.first { $0.terminal == "ghostty" && $0.terminal_session_id == tty }
-            }
+            // Find all sessions matching via TTY
+            var candidates = ghosttySessions.filter { matchedTTYs.contains($0.terminal_session_id) }
             // Backward compat: direct UUID match for old sessions
-            if matched == nil {
-                matched = sessions.first { $0.terminal == "ghostty" && $0.terminal_session_id == focusedUUID }
+            let candidateIds = Set(candidates.map { $0.session_id })
+            candidates += ghosttySessions.filter {
+                $0.terminal_session_id == focusedUUID && !candidateIds.contains($0.session_id)
             }
-            DispatchQueue.main.async { self.activeSessionId = matched?.session_id }
+
+            debugLog("detectGhostty: candidates=\(candidates.map { "\($0.session_id)(\($0.status))" }.joined(separator: ", "))")
+
+            // Pick best by status priority (attention > working > idle) then recency
+            let statusPriority: [String: Int] = [
+                "attention": 3, "working": 2, "starting": 1, "idle": 0, "dead": -1, "ended": -1
+            ]
+            let best = candidates.max { a, b in
+                let pa = statusPriority[a.status] ?? 0
+                let pb = statusPriority[b.status] ?? 0
+                if pa != pb { return pa < pb }
+                return a.updated_at < b.updated_at
+            }
+            DispatchQueue.main.async { self.activeSessionId = best?.session_id }
         }
     }
 
