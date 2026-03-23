@@ -62,13 +62,53 @@ The floating panel appears in the top-right corner. Drag to reposition — it re
 
 #### Fish shell
 
-If you use [fish](https://fishshell.com/), run the fish integration script after the main install:
+If you use [fish](https://fishshell.com/), save the following as `~/.config/fish/functions/claude.fish`. It wraps the `claude` command with tmux session management, propagates the Ghostty terminal UUID for click-to-switch, and adds devcontainer support.
 
-```bash
-./install_fish.sh
+```fish
+function claude --wraps=claude --description 'Claude Code with tmux session management'
+    # Pass-through for non-interactive subcommands
+    if test (count $argv) -ge 1
+        switch "$argv[1]"
+            case update mcp config --help -h --version -v
+                command claude $argv
+                return
+        end
+    end
+
+    set -l claude_args $argv
+    if set -q DEVCONTAINER
+        set claude_args --dangerously-skip-permissions $argv
+    end
+
+    set -l short_cwd (string replace "$HOME" "~" "$PWD")
+
+    if not set -q TMUX
+        # Not in tmux — create a detached session, send claude into it, attach
+        set -l sess_name "claude-$fish_pid"
+        tmux new-session -d -s $sess_name -x (tput cols) -y (tput lines)
+        tmux set-option -wt $sess_name automatic-rename off
+        tmux rename-window -t $sess_name "$short_cwd"
+        tmux set-option -g set-titles on 2>/dev/null
+        tmux set-option -g set-titles-string "tmux #W" 2>/dev/null
+        # Propagate Ghostty terminal UUID into tmux session (conf.d captures it
+        # at tab open when the tab is guaranteed focused; tmux server env may carry
+        # a different tab's UUID, so we explicitly forward the correct one)
+        if set -q GHOSTTY_TERMINAL_UUID
+            tmux send-keys -t $sess_name "set -gx GHOSTTY_TERMINAL_UUID '$GHOSTTY_TERMINAL_UUID'; command claude $claude_args" Enter
+        else
+            tmux send-keys -t $sess_name "command claude $claude_args" Enter
+        end
+        tmux attach-session -t $sess_name
+    else
+        # Already in tmux — rename current window and run directly
+        tmux set-option -w automatic-rename off
+        tmux rename-window "$short_cwd"
+        tmux set-option -g set-titles on 2>/dev/null
+        tmux set-option -g set-titles-string "tmux #W" 2>/dev/null
+        command claude $claude_args
+    end
+end
 ```
-
-This installs `claude.fish` to `~/.config/fish/functions/`, which wraps the `claude` command with tmux session management and session ID tracking for the monitor.
 
 #### Devcontainers
 
@@ -84,7 +124,10 @@ The monitor hook checks for this variable first and uses it directly, skipping t
 
 #### Tmux + Ghostty
 
-If you run Claude inside tmux panes within Ghostty tabs, add a small shell snippet that captures the Ghostty terminal UUID when the tab opens. This gives the monitor a reliable mapping from tmux panes to Ghostty tabs — without it, multiple panes (different TTYs) can get mapped to the wrong tab.
+If you run Claude inside tmux panes within Ghostty tabs, you need **two things** for reliable click-to-switch with multiple sessions in the same directory:
+
+1. **A shell snippet that captures the Ghostty terminal UUID when the tab opens** — the tab is guaranteed focused at this moment, so the UUID is always correct.
+2. **The `claude.fish` wrapper** (above) **propagates this UUID into tmux sessions** — without this, the tmux server inherits the UUID from whichever tab started it first, causing all sessions to map to the same tab.
 
 **Fish** — save as `~/.config/fish/conf.d/ghostty-uuid.fish`:
 
@@ -102,7 +145,7 @@ if [[ -n "$GHOSTTY_RESOURCES_DIR" && -z "$GHOSTTY_TERMINAL_UUID" ]]; then
 fi
 ```
 
-The UUID is captured once when the Ghostty tab opens (when it's definitively focused). The "not already set" guard prevents child shells (including tmux panes) from re-capturing a different value. Without this config, the monitor still works via tmux session mapping and focused-terminal fallback, but the env var is the most reliable strategy.
+The UUID is captured once when the Ghostty tab opens (when it's definitively focused). The "not already set" guard prevents child shells (including tmux panes) from re-capturing a different value. The `claude.fish` wrapper then forwards this UUID into the tmux session it creates, ensuring each session gets the correct tab's UUID regardless of tmux server environment.
 
 ### Uninstall
 
