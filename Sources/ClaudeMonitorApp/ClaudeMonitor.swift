@@ -1008,6 +1008,24 @@ class SessionReader: ObservableObject {
                 }
             }
         }
+
+        // Escalate "working" from any active child to parent
+        if !childSessions.isEmpty {
+            var parentHasChildWorking: Set<String> = []
+            for child in childSessions {
+                guard let parentSid = child.parent_session_id, child.status == "working" else { continue }
+                parentHasChildWorking.insert(parentSid)
+            }
+            for i in parentSessions.indices {
+                if parentHasChildWorking.contains(parentSessions[i].session_id) {
+                    // Only promote to working if parent isn't already in attention or working (or dead)
+                    if parentSessions[i].status != "dead" && parentSessions[i].status != "attention" && parentSessions[i].status != "working" {
+                        parentSessions[i].status = "working"
+                    }
+                }
+            }
+        }
+
         // Replace loaded with parent-only sessions (children are hidden from UI)
         loaded = parentSessions
 
