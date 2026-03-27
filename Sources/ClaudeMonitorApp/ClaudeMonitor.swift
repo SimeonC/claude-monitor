@@ -3,6 +3,20 @@ import Combine
 import SwiftUI
 import ClaudeMonitorCore
 
+// MARK: - Terminal Providers (shared across SessionReader + ActiveSessionTracker)
+
+let terminalProviders: [TerminalProvider] = [
+    GhosttyProvider(), CMUXProvider(), ITerm2Provider(), TerminalAppProvider()
+]
+
+func providerFor(name: String) -> TerminalProvider? {
+    terminalProviders.first { $0.name == name }
+}
+
+func providerFor(bundleId: String) -> TerminalProvider? {
+    terminalProviders.first { $0.bundleIdentifier == bundleId }
+}
+
 // MARK: - Team Reader
 
 class TeamReader: ObservableObject {
@@ -493,6 +507,7 @@ class SessionReader: ObservableObject {
                 var ghosttyUUIDMap: [String: [String]] = [:]  // backward compat: old UUID-based sessions
                 var itermSessions: [(id: String, termSid: String)] = []
                 let savedTtyMap = self.ttyMap  // snapshot for Ghostty UUID liveness
+                var jsonlFreshSessionIds: Set<String> = []
 
                 for (session, _) in currentSessions {
                     if session.status == "dead" { continue }
@@ -509,6 +524,7 @@ class SessionReader: ObservableObject {
                         // Backward compat: old Ghostty UUID sessions need AppleScript liveness
                         // New TTY sessions: skip JSONL-fresh sessions (TTY check below handles stale)
                         if !session.terminal_session_id.contains("-") {
+                            jsonlFreshSessionIds.insert(session.session_id)
                             continue
                         }
                     }
@@ -539,7 +555,7 @@ class SessionReader: ObservableObject {
                     }
                 }
 
-                // --- Ghostty UUID liveness check (for TTY sessions via ttyMap + backward compat) ---
+                // --- Surface UUID liveness check (Ghostty, CMUX, etc.) ---
                 // Collect UUIDs to check: from ttyMap for active Ghostty TTY sessions + old UUID sessions
                 var ghosttyTerminalIds: [String: [String]] = ghosttyUUIDMap
                 for (tty, sids) in ttyCheckMap {
@@ -547,14 +563,33 @@ class SessionReader: ObservableObject {
                         ghosttyTerminalIds[uuid, default: []].append(contentsOf: sids)
                     }
                 }
-                if !ghosttyTerminalIds.isEmpty {
-                    let liveIds = self.liveGhosttyTerminalIds()
+                if !ghosttyTerminalIds.isEmpty,
+                   let provider = providerFor(name: "ghostty") {
+                    let liveIds = provider.liveSurfaceIds()
                     NSLog("[ClaudeMonitor] Ghostty liveness: live=%@ checking=%@",
                           liveIds.sorted().joined(separator: ","),
                           ghosttyTerminalIds.keys.sorted().joined(separator: ","))
                     if !liveIds.isEmpty {
                         for (termId, sids) in ghosttyTerminalIds where !liveIds.contains(termId) {
                             deadSessionIds.formUnion(sids)
+                        }
+                    }
+                }
+
+                // CMUX workspace liveness check — liveSurfaceIds() returns workspace refs + UUIDs
+                let cmuxSessions = currentSessions.filter {
+                    $0.0.terminal == "cmux"
+                        && $0.0.status != "dead" && $0.0.status != "idle" && $0.0.status != "ended"
+                        && !jsonlFreshSessionIds.contains($0.0.session_id)
+                }
+                if !cmuxSessions.isEmpty, let cmuxProvider = providerFor(name: "cmux") {
+                    let liveIds = cmuxProvider.liveSurfaceIds()
+                    if !liveIds.isEmpty {
+                        for (session, _) in cmuxSessions {
+                            guard let wsId = session.cmux_workspace_id, !wsId.isEmpty else { continue }
+                            if !liveIds.contains(wsId) {
+                                deadSessionIds.insert(session.session_id)
+                            }
                         }
                     }
                 }
@@ -693,26 +728,6 @@ class SessionReader: ObservableObject {
         return false
     }
 
-    /// Return set of live Ghostty terminal UUIDs by enumerating all windows/tabs via AppleScript.
-    private func liveGhosttyTerminalIds() -> Set<String> {
-        let script = """
-            tell application "Ghostty"
-                set output to ""
-                repeat with w in every window
-                    repeat with t in every tab of w
-                        set output to output & id of focused terminal of t & linefeed
-                    end repeat
-                end repeat
-                return output
-            end tell
-            """
-        guard let appleScript = NSAppleScript(source: script) else { return [] }
-        var error: NSDictionary?
-        let result = appleScript.executeAndReturnError(&error)
-        guard error == nil, let output = result.stringValue else { return [] }
-        return Set(output.split(separator: "\n").map(String.init).filter { !$0.isEmpty })
-    }
-
     /// Run a shell command and return stdout, or nil on failure
     private func runShell(_ script: String) -> String? {
         let task = Process()
@@ -743,21 +758,18 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Relink a Ghostty session to the currently focused terminal tab.
-    /// Updates tty_map.json (TTY → UUID mapping), not the session file.
-    func relinkGhosttySession(_ session: SessionInfo) {
-        let script = "tell application \"Ghostty\" to return id of focused terminal of selected tab of front window"
+    /// Relink a session to the currently focused terminal surface.
+    /// Uses the appropriate TerminalProvider to get the focused surface ID,
+    /// then updates tty_map.json (TTY → UUID mapping).
+    func relinkSession(_ session: SessionInfo) {
+        guard let provider = providerFor(name: session.terminal) else {
+            debugLog("relink: no provider for terminal '\(session.terminal)'")
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            guard let appleScript = NSAppleScript(source: script) else { return }
-            var error: NSDictionary?
-            let result = appleScript.executeAndReturnError(&error)
-            if let error = error {
-                debugLog("relink: AppleScript error: \(error)")
-                return
-            }
-            guard let uuid = result.stringValue, !uuid.isEmpty else {
-                debugLog("relink: AppleScript returned empty/nil result: \(result)")
+            guard let uuid = provider.relinkSession(session) else {
+                debugLog("relink: provider returned nil for \(session.terminal)")
                 return
             }
             let ttyKey = session.terminal_session_id
@@ -767,7 +779,6 @@ class SessionReader: ObservableObject {
             }
 
             self.ioQueue.async {
-                // Update tty_map.json
                 let mapPath = "\(self.monitorDir)/tty_map.json"
                 var map = self.ttyMap
                 map[ttyKey] = uuid
@@ -1113,11 +1124,7 @@ class ActiveSessionTracker: ObservableObject {
 
     private var lastFocusedUUID: String?        // cached focused UUID to skip redundant matching
 
-    private let terminalBundleIds: Set<String> = [
-        "com.mitchellh.ghostty",
-        "com.googlecode.iterm2",
-        "com.apple.Terminal",
-    ]
+    private let terminalBundleIds: Set<String> = Set(terminalProviders.map(\.bundleIdentifier))
 
     init(sessionReader: SessionReader) {
         self.sessionReader = sessionReader
@@ -1200,7 +1207,7 @@ class ActiveSessionTracker: ObservableObject {
     private func detectActiveSession() {
         guard let sessions = sessionReader?.sessions, !sessions.isEmpty else { return }
 
-        // Try TTY carryover before expensive AppleScript polling
+        // Try TTY carryover before expensive terminal polling
         if activeSessionId == nil || !sessions.contains(where: { $0.session_id == activeSessionId }) {
             if let tty = lastActiveTTY, !tty.isEmpty,
                let ttyTime = lastActiveTTYTime,
@@ -1213,30 +1220,12 @@ class ActiveSessionTracker: ObservableObject {
         }
 
         guard let app = NSWorkspace.shared.frontmostApplication,
-              let bundleId = app.bundleIdentifier else { return }
+              let bundleId = app.bundleIdentifier,
+              let provider = providerFor(bundleId: bundleId) else { return }
 
-        if bundleId == "com.mitchellh.ghostty" {
-            detectGhosttySession(app: app, sessions: sessions)
-        } else if bundleId == "com.googlecode.iterm2" {
-            detectITerm2Session(sessions: sessions)
-        } else if bundleId == "com.apple.Terminal" {
-            detectTerminalSession(sessions: sessions)
-        }
-    }
-
-    private func detectGhosttySession(app: NSRunningApplication, sessions: [SessionInfo]) {
-        let script = """
-            tell application "Ghostty"
-                set t to focused terminal of selected tab of front window
-                return (id of t) & "|" & (name of selected tab of front window)
-            end tell
-            """
         backgroundQueue.async { [weak self] in
             guard let self = self else { return }
-            guard let appleScript = NSAppleScript(source: script) else { return }
-            var error: NSDictionary?
-            let result = appleScript.executeAndReturnError(&error)
-            guard error == nil, let rawResult = result.stringValue else {
+            guard let surface = provider.focusedSurface() else {
                 DispatchQueue.main.async {
                     self.lastFocusedUUID = nil
                     self.activeSessionId = nil
@@ -1244,131 +1233,23 @@ class ActiveSessionTracker: ObservableObject {
                 return
             }
 
-            // Parse "uuid|tabName" — defensively handle missing separator
-            let focusedUUID: String
-            let tabName: String?
-            if let sepIndex = rawResult.firstIndex(of: "|") {
-                focusedUUID = String(rawResult[rawResult.startIndex..<sepIndex])
-                let afterSep = rawResult.index(after: sepIndex)
-                tabName = afterSep < rawResult.endIndex ? String(rawResult[afterSep...]) : nil
-            } else {
-                focusedUUID = rawResult
-                tabName = nil
-            }
-
-            // Skip matching work if focused UUID hasn't changed
-            if focusedUUID == self.lastFocusedUUID,
+            // Skip matching if focused surface hasn't changed
+            if surface.id == self.lastFocusedUUID,
                let currentId = self.activeSessionId,
                sessions.contains(where: { $0.session_id == currentId }) {
                 return
             }
 
-            let ghosttySessions = sessions.filter { $0.terminal == "ghostty" }
-            debugLog("detectGhostty: focused=\(focusedUUID) tab=\(tabName ?? "nil") ghosttySessions=\(ghosttySessions.map { "\($0.session_id)=\($0.terminal_session_id) gid=\($0.ghostty_terminal_id ?? "nil")" }.joined(separator: ", "))")
+            let ttyMap = self.sessionReader?.ttyMap ?? [:]
+            let candidates = provider.matchSessions(sessions, toSurface: surface, ttyMap: ttyMap)
 
-            // Primary: direct ghostty_terminal_id match
-            var candidates = ghosttySessions.filter { $0.ghostty_terminal_id == focusedUUID }
+            debugLog("detectActive(\(provider.name)): surface=\(surface.id) tab=\(surface.tabName ?? "nil") candidates=\(candidates.map { "\($0.session_id)(\($0.status))" }.joined(separator: ", "))")
 
-            if candidates.isEmpty {
-                // Fallback: ttyMap reverse-lookup (old sessions without ghostty_terminal_id)
-                let ttyMap = self.sessionReader?.ttyMap ?? [:]
-                let matchedTTYs = Set(ttyMap.filter { $0.value == focusedUUID }.map { $0.key })
-                candidates = ghosttySessions.filter { matchedTTYs.contains($0.terminal_session_id) }
-
-                // Backward compat: direct UUID in terminal_session_id
-                let candidateIds = Set(candidates.map { $0.session_id })
-                candidates += ghosttySessions.filter {
-                    $0.terminal_session_id == focusedUUID && !candidateIds.contains($0.session_id)
-                }
-            }
-
-            // Final fallback: match by tab title parsed as CWD
-            if candidates.isEmpty, let tabName = tabName, !tabName.isEmpty {
-                let home = NSHomeDirectory()
-                // Normalize tab name to absolute path — fish sets tab title to CWD
-                var cwdCandidates: [String] = []
-                if tabName.hasPrefix("~") {
-                    cwdCandidates.append(home + tabName.dropFirst())
-                } else if tabName.hasPrefix("/") {
-                    cwdCandidates.append(tabName)
-                }
-                // Tab name may contain "fish ~/path" — try space-separated tokens
-                for token in tabName.split(separator: " ").map(String.init) {
-                    if token.hasPrefix("~") {
-                        cwdCandidates.append(home + token.dropFirst())
-                    } else if token.hasPrefix("/") {
-                        cwdCandidates.append(token)
-                    }
-                }
-                for tabCWD in cwdCandidates {
-                    candidates = ghosttySessions.filter {
-                        $0.cwd == tabCWD || $0.cwd.hasPrefix(tabCWD + "/")
-                    }
-                    if !candidates.isEmpty { break }
-                }
-                if !candidates.isEmpty {
-                    debugLog("detectGhostty: CWD fallback matched via tab name '\(tabName)'")
-                }
-            }
-
-            debugLog("detectGhostty: candidates=\(candidates.map { "\($0.session_id)(\($0.status))" }.joined(separator: ", "))")
-
-            // Pick best by status priority (attention > working > idle) then recency
-            let statusPriority: [String: Int] = [
-                "attention": 3, "working": 2, "starting": 1, "idle": 0, "dead": -1, "ended": -1
-            ]
-            let best = candidates.max { a, b in
-                let pa = statusPriority[a.status] ?? 0
-                let pb = statusPriority[b.status] ?? 0
-                if pa != pb { return pa < pb }
-                return a.updated_at < b.updated_at
-            }
+            let best = bestCandidate(candidates)
             DispatchQueue.main.async {
-                self.lastFocusedUUID = focusedUUID
+                self.lastFocusedUUID = surface.id
                 self.activeSessionId = best?.session_id
             }
-        }
-    }
-
-    private func detectITerm2Session(sessions: [SessionInfo]) {
-        let script = """
-            tell application "iTerm2"
-                get unique id of current session of current tab of current window
-            end tell
-            """
-        backgroundQueue.async { [weak self] in
-            guard let appleScript = NSAppleScript(source: script) else { return }
-            var error: NSDictionary?
-            let result = appleScript.executeAndReturnError(&error)
-            guard error == nil, let guid = result.stringValue else {
-                DispatchQueue.main.async { self?.activeSessionId = nil }
-                return
-            }
-            let matched = sessions.first { session in
-                // terminal_session_id format: "w0t0p0:GUID"
-                let parts = session.terminal_session_id.split(separator: ":")
-                return parts.count >= 2 && String(parts[1]) == guid
-            }
-            DispatchQueue.main.async { self?.activeSessionId = matched?.session_id }
-        }
-    }
-
-    private func detectTerminalSession(sessions: [SessionInfo]) {
-        let script = """
-            tell application "Terminal"
-                get tty of selected tab of front window
-            end tell
-            """
-        backgroundQueue.async { [weak self] in
-            guard let appleScript = NSAppleScript(source: script) else { return }
-            var error: NSDictionary?
-            let result = appleScript.executeAndReturnError(&error)
-            guard error == nil, let tty = result.stringValue else {
-                DispatchQueue.main.async { self?.activeSessionId = nil }
-                return
-            }
-            let matched = sessions.first { $0.terminal_session_id == tty }
-            DispatchQueue.main.async { self?.activeSessionId = matched?.session_id }
         }
     }
 }
@@ -1395,127 +1276,21 @@ func debugLog(_ message: String) {
 
 func switchToSession(_ session: SessionInfo, ttyMap: [String: String] = [:]) {
     debugLog("switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project) sid=\(session.session_id)")
-    if session.terminal == "iterm2" && !session.terminal_session_id.isEmpty {
-        switchToITerm2(sessionId: session.terminal_session_id)
-    } else if session.terminal == "ghostty" {
-        switchToGhostty(session: session, ttyMap: ttyMap)
-    } else if session.terminal == "terminal" && !session.terminal_session_id.isEmpty {
-        switchToTerminal(ttyPath: session.terminal_session_id)
+    if let provider = providerFor(name: session.terminal) {
+        provider.focusSurface(session: session, ttyMap: ttyMap)
     } else {
-        NSLog("[ClaudeMonitor] falling back to cwd switch (no terminal info)")
+        debugLog("switchToSession: no provider for '\(session.terminal)', falling back to CWD")
         switchByTerminalCwd(cwd: session.cwd)
     }
 }
 
-func switchToITerm2(sessionId: String) {
-    // sessionId format from ITERM_SESSION_ID: "w0t0p0:GUID"
-    let parts = sessionId.split(separator: ":")
-    guard parts.count >= 2 else {
-        if let appleScript = NSAppleScript(source: "tell application \"iTerm2\" to activate") {
-            var error: NSDictionary?
-            appleScript.executeAndReturnError(&error)
-        }
-        return
-    }
-    let uniqueId = String(parts[1])
-
-    let script = """
-        tell application "iTerm2"
-            activate
-            repeat with w in windows
-                repeat with t in tabs of w
-                    repeat with s in sessions of t
-                        if unique id of s is "\(uniqueId)" then
-                            select t
-                            return
-                        end if
-                    end repeat
-                end repeat
-            end repeat
-        end tell
-        """
-
-    if let appleScript = NSAppleScript(source: script) {
-        var error: NSDictionary?
-        appleScript.executeAndReturnError(&error)
-    }
-}
-
-func switchToTerminal(ttyPath: String) {
-    // Match Terminal.app tab by its tty device path
-    let script = """
-        tell application "Terminal"
-            activate
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if tty of t is "\(ttyPath)" then
-                        set selected tab of w to t
-                        set index of w to 1
-                        return
-                    end if
-                end repeat
-            end repeat
-        end tell
-        """
-
-    if let appleScript = NSAppleScript(source: script) {
-        var error: NSDictionary?
-        appleScript.executeAndReturnError(&error)
-    }
-}
-
-
-func switchToGhostty(session: SessionInfo, ttyMap: [String: String]) {
-    let tty = session.terminal_session_id
-    debugLog("switchToGhostty: tty=\(tty) ghostty_terminal_id=\(session.ghostty_terminal_id ?? "nil")")
-
-    // Primary: use stored ghostty_terminal_id
-    // Fallback: ttyMap lookup, or direct UUID in terminal_session_id (backward compat)
-    var uuid: String?
-    if let gid = session.ghostty_terminal_id, !gid.isEmpty {
-        uuid = gid
-    } else if let mapped = ttyMap[tty] {
-        uuid = mapped
-    } else if tty.contains("-") {
-        // Old session with UUID directly in terminal_session_id
-        uuid = tty
-    }
-
-    if let uuid = uuid {
-        let script = "tell application \"Ghostty\" to focus terminal id \"\(uuid)\""
-        debugLog("switchToGhostty: running AppleScript: \(script)")
-        if let appleScript = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            appleScript.executeAndReturnError(&error)
-            if let error = error {
-                debugLog("switchToGhostty: AppleScript error: \(error)")
-            } else {
-                debugLog("switchToGhostty: success")
-                return
-            }
-        }
-    }
-    // Fallback: just activate the app
-    debugLog("switchToGhostty: falling back to activate")
-    NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first?.activate()
-}
-
 func switchByTerminalCwd(cwd: String) {
-    // Fallback: detect which terminal is running and activate it
-    if NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first != nil {
-        NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").first?.activate()
-        return
-    }
-    if NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.googlecode.iterm2" }) {
-        if let appleScript = NSAppleScript(source: "tell application \"iTerm2\" to activate") {
-            var error: NSDictionary?
-            appleScript.executeAndReturnError(&error)
+    // Fallback: find any running terminal and activate it
+    for provider in terminalProviders {
+        if NSRunningApplication.runningApplications(withBundleIdentifier: provider.bundleIdentifier).first != nil {
+            NSRunningApplication.runningApplications(withBundleIdentifier: provider.bundleIdentifier).first?.activate()
+            return
         }
-        return
-    }
-    if let appleScript = NSAppleScript(source: "tell application \"Terminal\" to activate") {
-        var error: NSDictionary?
-        appleScript.executeAndReturnError(&error)
     }
 }
 
@@ -2031,9 +1806,9 @@ struct MonitorContentView: View {
                                     },
                                     contextMenuBuilder: { event in
                                         let menu = NSMenu()
-                                        if session.terminal == "ghostty" {
+                                        if providerFor(name: session.terminal) != nil {
                                             menu.addItem(ClosureMenuItem("Relink to Focused Tab") {
-                                                reader.relinkGhosttySession(session)
+                                                reader.relinkSession(session)
                                             })
                                         }
                                         menu.addItem(ClosureMenuItem("Delete Session") {

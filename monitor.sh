@@ -189,7 +189,8 @@ detect_terminal() {
     done
     [ -n "${DEVCONTAINER:-}" ] && [ -n "$tty_id" ] && tty_id="$(hostname):$tty_id"
 
-    if [ -n "${ITERM_SESSION_ID:-}" ]; then echo "iterm2|$tty_id"
+    if [ -n "${CMUX_SURFACE_ID:-}" ]; then echo "cmux|$tty_id"
+    elif [ -n "${ITERM_SESSION_ID:-}" ]; then echo "iterm2|$tty_id"
     elif [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then echo "ghostty|$tty_id"
     elif [ -n "$tty_id" ]; then echo "terminal|$tty_id"
     else echo "|"
@@ -223,7 +224,7 @@ get_live_ghostty_uuids() {
 # --- Seed tty_map.json + tmux_map.json: TTY/tmux → Ghostty UUID mapping ---
 # Called at SessionStart. Priority: env var → tmux_map → staleness-checked tty_map → focused terminal.
 seed_tty_map() {
-    [ "$TERM_APP" = "ghostty" ] || return 0
+    [ "$TERM_APP" = "ghostty" ] || [ "$TERM_APP" = "cmux" ] || return 0
     [ -n "$TERM_SID" ] || return 0
     local map_file="$MONITOR_DIR/tty_map.json"
     local tmux_map_file="$MONITOR_DIR/tmux_map.json"
@@ -233,6 +234,13 @@ seed_tty_map() {
     local tmux_session=""
     if [ -n "${TMUX:-}" ]; then
         tmux_session=$(tmux display-message -p '#S' 2>/dev/null)
+    fi
+
+    # CMUX: use env vars directly (CMUX_SURFACE_ID is the session identifier)
+    if [ -n "${CMUX_SURFACE_ID:-}" ]; then
+        CMUX_FRESH_SURFACE="$CMUX_SURFACE_ID"
+        CMUX_FRESH_WORKSPACE="${CMUX_WORKSPACE_ID:-}"
+        return 0
     fi
 
     # 1. GHOSTTY_TERMINAL_UUID env var (set by shell config — always correct)
@@ -309,8 +317,10 @@ if [ "$IS_SUBAGENT" = "true" ]; then
                     --arg term_sid "$TERM_SID" \
                     --arg parent "$PARENT_SESSION_ID" \
                     --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
+                    --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
+                    --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
                 ;;
             Notification)
@@ -476,6 +486,13 @@ case "$EVENT" in
                 update_json_file "$SESSION_FILE" --arg gid "$GHOSTTY_RESOLVED_UUID" \
                     '.ghostty_terminal_id = $gid'
             fi
+            # Persist CMUX surface/workspace IDs if resolved
+            if [ -n "${CMUX_FRESH_SURFACE:-}" ]; then
+                update_json_file "$SESSION_FILE" \
+                    --arg csid "${CMUX_FRESH_SURFACE}" \
+                    --arg cwid "${CMUX_FRESH_WORKSPACE:-}" \
+                    '.cmux_surface_id = $csid | if $cwid != "" then .cmux_workspace_id = $cwid else . end'
+            fi
             # Persist skip_permissions flag (clear if not detected)
             if [ "$SKIP_PERMS" = "true" ]; then
                 update_json_file "$SESSION_FILE" '.skip_permissions = true'
@@ -493,8 +510,10 @@ case "$EVENT" in
                     --arg terminal "$TERM_APP" \
                     --arg term_sid "$TERM_SID" \
                     --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
+                    --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
+                    --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, skip_permissions: true} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, skip_permissions: true} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
             else
                 jq -n \
@@ -505,8 +524,10 @@ case "$EVENT" in
                     --arg terminal "$TERM_APP" \
                     --arg term_sid "$TERM_SID" \
                     --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
+                    --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
+                    --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
             fi
         fi
@@ -520,6 +541,7 @@ case "$EVENT" in
                 --arg updated "$NOW" \
                 'if .status == "dead" then . else .status = $status | .updated_at = $updated end'
         fi
+        command -v cmux >/dev/null 2>&1 && cmux notify --title "Claude Code" --body "Session complete: $PROJECT_NAME"
         ;;
 
     Notification)
@@ -544,6 +566,7 @@ case "$EVENT" in
                 --arg term_sid "$TERM_SID" \
                 'if .status == "dead" then . else .status = $status | .updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end end'
         fi
+        command -v cmux >/dev/null 2>&1 && cmux notify --title "Claude Code" --body "Needs attention: $PROJECT_NAME"
         ;;
 
     SessionEnd)

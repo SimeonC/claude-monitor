@@ -46,7 +46,7 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** CLI
 - **Xcode Command Line Tools** — `xcode-select --install`
 - **jq** — `brew install jq`
-- **Ghostty 1.3.0+, iTerm2, or Terminal.app**
+- **Ghostty 1.3.0+, [cmux](https://cmux.dev), iTerm2, or Terminal.app**
 
 ### Setup
 
@@ -157,6 +157,14 @@ rm -f ~/Library/LaunchAgents/com.claude.monitor.plist
 ```
 
 Then remove the hook entries from `~/.claude/settings.json`.
+
+## cmux Setup
+
+If you use [cmux](https://cmux.dev), two extra steps are needed for click-to-switch and focus detection:
+
+1. **Enable external socket access** — Open cmux Settings and set Socket Access Mode to `allowAll`, or launch cmux with `CMUX_SOCKET_MODE=allowAll`. This allows the monitor (which runs outside cmux) to switch workspaces via the socket API.
+
+2. **Install the cmux CLI to PATH** — Inside cmux, open the Command Palette (`Cmd+Shift+P`) and run **"Shell Command: Install 'cmux' in PATH"**. This enables `cmux notify` calls from hooks for attention/completion notifications.
 
 ## How It Works
 
