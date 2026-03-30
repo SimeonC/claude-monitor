@@ -1,3 +1,4 @@
+import Carbon
 import Cocoa
 import Combine
 import SwiftUI
@@ -142,7 +143,7 @@ class DirectoryWatcher {
         )
 
         if let stream = stream {
-            FSEventStreamScheduleWithRunLoop(stream, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
             FSEventStreamStart(stream)
         }
     }
@@ -1501,32 +1502,9 @@ struct SessionRowView: View {
 
 // MARK: - Header Bar
 
-struct RefreshButton: View {
-    var sessionReader: SessionReader?
-    var shortcutManager: ShortcutManager?
-    @State private var showCheck = false
-
-    var body: some View {
-        Button {
-            sessionReader?.scanProjects()
-            sessionReader?.readSessions()
-            shortcutManager?.recheckAccessibility()
-            showCheck = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                showCheck = false
-            }
-        } label: {
-            Text(showCheck ? "\u{2713}" : "\u{21BB}")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(.white.opacity(0.7))
-        }
-        .buttonStyle(.plain)
-        .focusable(false)
-    }
-}
-
-struct ShortcutButton: View {
+struct CogButton: View {
     @ObservedObject var shortcutManager: ShortcutManager
+    var sessionReader: SessionReader?
     @State private var showPopover = false
     @State private var recordingSlot: Int?  // nil = not recording, 1 or 2
     @State private var recordingMonitor: Any?
@@ -1535,7 +1513,7 @@ struct ShortcutButton: View {
         Button {
             showPopover.toggle()
         } label: {
-            Image(systemName: "keyboard")
+            Image(systemName: "gearshape")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.white.opacity(0.7))
         }
@@ -1543,6 +1521,7 @@ struct ShortcutButton: View {
         .focusable(false)
         .popover(isPresented: $showPopover, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 12) {
+                // Jump Shortcuts section
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Jump Shortcuts")
                         .font(.system(size: 13, weight: .semibold))
@@ -1562,6 +1541,23 @@ struct ShortcutButton: View {
                                 display: shortcutManager.displayString2,
                                 onClear: { shortcutManager.clear2() })
                 }
+
+                Divider()
+                    .background(Color.white.opacity(0.15))
+
+                // Actions section
+                VStack(alignment: .leading, spacing: 6) {
+                    actionButton(label: "Refresh Data", icon: "arrow.clockwise") {
+                        sessionReader?.scanProjects()
+                        sessionReader?.readSessions()
+                    }
+                    actionButton(label: "Reinstall Shortcuts", icon: "keyboard") {
+                        shortcutManager.reinstall()
+                    }
+                    actionButton(label: "Restart App", icon: "arrow.counterclockwise.circle") {
+                        restartApp()
+                    }
+                }
             }
             .padding(14)
             .background(Color(nsColor: NSColor(red: 0.22, green: 0.10, blue: 0.42, alpha: 1.0)))
@@ -1569,6 +1565,25 @@ struct ShortcutButton: View {
         .onChange(of: showPopover) { _, newValue in
             if !newValue { stopRecording() }
         }
+    }
+
+    @ViewBuilder
+    private func actionButton(label: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.6))
+                    .frame(width: 14)
+                Text(label)
+                    .font(.system(size: 12))
+                    .foregroundColor(.white.opacity(0.8))
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
     }
 
     @ViewBuilder
@@ -1651,6 +1666,14 @@ struct ShortcutButton: View {
         }
         shortcutManager.install()
     }
+
+    private func restartApp() {
+        let uid = getuid()
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "launchctl kickstart -k 'gui/\(uid)/com.claude.monitor'"]
+        try? task.run()
+    }
 }
 
 struct HeaderBar: View {
@@ -1709,9 +1732,7 @@ struct HeaderBar: View {
                     .foregroundColor(.white.opacity(0.4))
                     .fixedSize()
 
-                ShortcutButton(shortcutManager: shortcutManager)
-                    .fixedSize()
-                RefreshButton(sessionReader: sessionReader, shortcutManager: shortcutManager)
+                CogButton(shortcutManager: shortcutManager, sessionReader: sessionReader)
                     .fixedSize()
             }
             .layoutPriority(1)
@@ -2136,11 +2157,11 @@ class ShortcutManager: ObservableObject {
     @Published var keyCode2: UInt16
     @Published var modifierFlags2: NSEvent.ModifierFlags
 
-    private var globalMonitor: Any?
+    private var hotKeyRef1: EventHotKeyRef?
+    private var hotKeyRef2: EventHotKeyRef?
+    private var eventHandlerRef: EventHandlerRef?
     private var localMonitor: Any?
     private let onTrigger: () -> Void
-
-    private var accessibilityTimer: Timer?
 
     private static let keyNames: [UInt16: String] = [
         0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X", 8: "C", 9: "V",
@@ -2177,36 +2198,13 @@ class ShortcutManager: ObservableObject {
             self.keyCode2 = UInt16.max
             self.modifierFlags2 = []
         }
-        // Defer monitor installation until the run loop is active so global
-        // event monitors work immediately in .accessory apps.
+        // Defer installation until the run loop is active.
         DispatchQueue.main.async { [weak self] in
-            self?.ensureAccessibilityAndInstall()
+            self?.install()
         }
     }
 
-    /// Re-check accessibility permission and install monitors if now granted.
-    func recheckAccessibility() {
-        guard globalMonitor == nil else { return }  // already installed
-        ensureAccessibilityAndInstall()
-    }
 
-    /// Request accessibility access (prompts user if needed) and install monitors.
-    /// If access isn't granted yet, poll every 2s until it is.
-    private func ensureAccessibilityAndInstall() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
-        if AXIsProcessTrustedWithOptions(opts) {
-            install()
-        } else {
-            // Poll until user grants access in System Settings
-            accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
-                if AXIsProcessTrusted() {
-                    timer.invalidate()
-                    self?.accessibilityTimer = nil
-                    self?.install()
-                }
-            }
-        }
-    }
 
     var isEnabled: Bool { keyCode != UInt16.max }
     var isEnabled2: Bool { keyCode2 != UInt16.max }
@@ -2257,12 +2255,51 @@ class ShortcutManager: ObservableObject {
 
     func install() {
         uninstall()
-        guard isEnabled || isEnabled2 else { return }
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if self?.matches(event) == true { self?.onTrigger() }
+        guard isEnabled || isEnabled2 else {
+            debugLog("Shortcut install skipped: no shortcuts enabled")
+            return
         }
+
+        // Use Carbon RegisterEventHotKey for global hotkeys.
+        // NSEvent.addGlobalMonitorForEvents and CGEvent taps both silently fail
+        // on macOS Sequoia even with accessibility granted. Carbon hotkeys are
+        // the only reliable method and don't require accessibility permission.
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                     eventKind: UInt32(kEventHotKeyPressed))
+        let handler: EventHandlerUPP = { _, event, refcon -> OSStatus in
+            guard let refcon = refcon else { return OSStatus(eventNotHandledErr) }
+            let mgr = Unmanaged<ShortcutManager>.fromOpaque(refcon).takeUnretainedValue()
+            var hotKeyID = EventHotKeyID()
+            let err = GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                                        EventParamType(typeEventHotKeyID), nil,
+                                        MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
+            guard err == noErr else { return err }
+            debugLog("Global shortcut triggered: hotKeyID=\(hotKeyID.id)")
+            mgr.onTrigger()
+            return noErr
+        }
+        InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, refcon, &eventHandlerRef)
+
+        if isEnabled {
+            let carbonMods = Self.carbonModifiers(from: modifierFlags)
+            let hotKeyID1 = EventHotKeyID(signature: OSType(0x434C4D31), id: 1)  // "CLM1"
+            let status = RegisterEventHotKey(UInt32(keyCode), carbonMods, hotKeyID1,
+                                             GetApplicationEventTarget(), 0, &hotKeyRef1)
+            debugLog("RegisterEventHotKey slot1: keyCode=\(keyCode) mods=\(carbonMods) status=\(status)")
+        }
+        if isEnabled2 {
+            let carbonMods = Self.carbonModifiers(from: modifierFlags2)
+            let hotKeyID2 = EventHotKeyID(signature: OSType(0x434C4D32), id: 2)  // "CLM2"
+            let status = RegisterEventHotKey(UInt32(keyCode2), carbonMods, hotKeyID2,
+                                             GetApplicationEventTarget(), 0, &hotKeyRef2)
+            debugLog("RegisterEventHotKey slot2: keyCode=\(keyCode2) mods=\(carbonMods) status=\(status)")
+        }
+
+        // Keep local monitor for events when our own panel is focused
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if self?.matches(event) == true {
+                debugLog("Local shortcut triggered: keyCode=\(event.keyCode)")
                 self?.onTrigger()
                 return nil
             }
@@ -2270,10 +2307,24 @@ class ShortcutManager: ObservableObject {
         }
     }
 
+    /// Convert NSEvent.ModifierFlags to Carbon modifier flags.
+    private static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
+        var mods: UInt32 = 0
+        if flags.contains(.control) { mods |= UInt32(controlKey) }
+        if flags.contains(.shift) { mods |= UInt32(shiftKey) }
+        if flags.contains(.option) { mods |= UInt32(optionKey) }
+        if flags.contains(.command) { mods |= UInt32(cmdKey) }
+        return mods
+    }
+
     func uninstall() {
-        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        if let ref = hotKeyRef1 { UnregisterEventHotKey(ref) }
+        if let ref = hotKeyRef2 { UnregisterEventHotKey(ref) }
+        hotKeyRef1 = nil
+        hotKeyRef2 = nil
+        if let ref = eventHandlerRef { RemoveEventHandler(ref) }
+        eventHandlerRef = nil
         if let m = localMonitor { NSEvent.removeMonitor(m) }
-        globalMonitor = nil
         localMonitor = nil
     }
 
@@ -2303,7 +2354,6 @@ class ShortcutManager: ObservableObject {
     }
 
     deinit {
-        accessibilityTimer?.invalidate()
         uninstall()
     }
 }

@@ -9,7 +9,8 @@ CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 MONITOR_DIR="$CLAUDE_HOME/monitor"
 HOOKS_DIR="$CLAUDE_HOME/hooks"
 LABEL="com.claude.monitor"
-BINARY="$MONITOR_DIR/claude_monitor"
+APP_BUNDLE="$MONITOR_DIR/Claude Code Monitor.app"
+BINARY="$APP_BUNDLE/Contents/MacOS/ClaudeCodeMonitor"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 SETTINGS_FILE="$CLAUDE_HOME/settings.json"
 
@@ -57,26 +58,55 @@ jq --arg cmd "$STATUSLINE_CMD" '.statusLine = {"type": "command", "command": $cm
     "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
 echo "Configured statusLine hook in settings.json."
 
-# --- 4. Build: compile in repo, deploy binary + monitor.sh ---
-echo "Compiling Claude Monitor..."
-(cd "$REPO_DIR" && swift build -c release --product ClaudeMonitor 2>&1)
+# --- 4. Build: compile in repo, deploy as .app bundle + monitor.sh ---
+echo "Compiling Claude Code Monitor..."
+(cd "$REPO_DIR" && swift build -c release --product ClaudeCodeMonitor 2>&1)
 
 echo "Build successful."
-cp "$REPO_DIR/.build/release/ClaudeMonitor" "$BINARY"
-codesign -s - --force "$BINARY"
+
+# Remove old bare binary if present
+rm -f "$MONITOR_DIR/claude_monitor"
+
+# Create .app bundle structure
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+cp "$REPO_DIR/.build/release/ClaudeCodeMonitor" "$BINARY"
+cat > "$APP_BUNDLE/Contents/Info.plist" << 'INFOPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.simeonc.claude_code_monitor</string>
+    <key>CFBundleExecutable</key>
+    <string>ClaudeCodeMonitor</string>
+    <key>CFBundleName</key>
+    <string>Claude Code Monitor</string>
+    <key>CFBundleDisplayName</key>
+    <string>Claude Code Monitor</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+INFOPLIST
+
+# Sign the app bundle (not just the binary)
+codesign -s - --force --identifier com.simeonc.claude_code_monitor "$APP_BUNDLE"
+
 cp "$REPO_DIR/monitor.sh" "$HOOKS_DIR/monitor.sh"
 chmod +x "$HOOKS_DIR/monitor.sh"
 
-# --- 5. LaunchAgent (only if not installed) ---
-AGENT_LOADED=false
-if launchctl print "gui/$(id -u)/$LABEL" &>/dev/null; then
-    AGENT_LOADED=true
-fi
-
-if [ "$AGENT_LOADED" = false ]; then
-    # Unload if plist exists but agent is stale
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    cat > "$PLIST" << EOF
+# --- 5. LaunchAgent ---
+# Always write the plist (binary path may have changed)
+launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+cat > "$PLIST" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -101,33 +131,13 @@ if [ "$AGENT_LOADED" = false ]; then
 </dict>
 </plist>
 EOF
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
-    AGENT_LOADED=true
-    echo ""
-    echo "Installed LaunchAgent: $PLIST"
-    echo "claude_monitor will start on login and restart if it crashes."
-    echo ""
-    echo "IMPORTANT: Grant Accessibility permissions to claude_monitor:"
-    echo "  System Settings > Privacy & Security > Accessibility"
-    echo "  Add: $BINARY"
-    echo ""
-    echo "Useful commands:"
-    echo '  Restart:  launchctl kickstart -k gui/$(id -u)/'"$LABEL"
-    echo '  Stop:     launchctl kill SIGTERM gui/$(id -u)/'"$LABEL"
-    echo '  Unload:   launchctl bootout gui/$(id -u)/'"$LABEL"
-    echo ""
-fi
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+echo "Installed LaunchAgent: $PLIST"
+echo "Claude Code Monitor will start on login and restart if it crashes."
+echo ""
+echo "Useful commands:"
+echo '  Restart:  launchctl kickstart -k gui/$(id -u)/'"$LABEL"
+echo '  Stop:     launchctl kill SIGTERM gui/$(id -u)/'"$LABEL"
+echo '  Unload:   launchctl bootout gui/$(id -u)/'"$LABEL"
 
-# --- 6. Restart ---
-if launchctl print "gui/$(id -u)/$LABEL" &>/dev/null; then
-    echo "Restarting via launchctl..."
-    launchctl kickstart -k "gui/$(id -u)/$LABEL"
-else
-    pkill -f "claude_monitor$" 2>/dev/null || true
-    sleep 0.5
-    echo "Launching Claude Monitor..."
-    "$BINARY" &
-    disown 2>/dev/null
-fi
-
-echo "Claude Monitor is running."
+echo "Claude Code Monitor is running."

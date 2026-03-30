@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClaudeMonitor",
+    name: "ClaudeCodeMonitor",
     platforms: [.macOS(.v14)],
     targets: [
         .target(
@@ -10,7 +10,7 @@ let package = Package(
             path: "Sources/ClaudeMonitorCore"
         ),
         .executableTarget(
-            name: "ClaudeMonitor",
+            name: "ClaudeCodeMonitor",
             dependencies: ["ClaudeMonitorCore"],
             path: "Sources/ClaudeMonitorApp",
             linkerSettings: [
