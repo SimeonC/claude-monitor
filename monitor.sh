@@ -395,12 +395,17 @@ ensure_session_file() {
     if [ -f "$SESSION_FILE" ] && [ -s "$SESSION_FILE" ] && jq -e . "$SESSION_FILE" >/dev/null 2>&1; then
         return 0
     fi
+    local skip_val="false"
+    if detect_skip_permissions || [ -n "${DEVCONTAINER:-}" ]; then skip_val="true"; fi
     jq -n \
         --arg sid "$SESSION_ID" --arg status "idle" \
         --arg project "$PROJECT" --arg cwd "${CWD:-}" \
         --arg terminal "$TERM_APP" --arg term_sid "$TERM_SID" \
+        --arg csid "${CMUX_SURFACE_ID:-}" \
+        --arg cwid "${CMUX_WORKSPACE_ID:-}" \
+        --argjson skip "$skip_val" \
         --arg now "$NOW" \
-        '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0}' \
+        '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end | if $skip then .skip_permissions = true else . end' \
         > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
@@ -413,7 +418,9 @@ backfill_terminal() {
         --arg updated "$NOW" \
         --arg terminal "$TERM_APP" \
         --arg term_sid "$TERM_SID" \
-        '.updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end'
+        --arg csid "${CMUX_SURFACE_ID:-}" \
+        --arg cwid "${CMUX_WORKSPACE_ID:-}" \
+        '.updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end'
 }
 
 # Helper: mark stale session files for the same terminal tab as dead (different session_id)

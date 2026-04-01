@@ -802,7 +802,7 @@ class SessionReader: ObservableObject {
             let fm = FileManager.default
             var toRemove: [String] = []
             for (sid, meta) in self.sessionMetaCache {
-                if let tn = meta.teamName, teamNames.contains(tn) {
+                if meta.isSubagent, let tn = meta.teamName, teamNames.contains(tn) {
                     toRemove.append(sid)
                 }
             }
