@@ -982,6 +982,18 @@ class SessionReader: ObservableObject {
         }
 
         // --- Team agent linking: set parent_session_id from meta cache teamName ---
+        // Ensure sessionMetaCache is populated for all loaded sessions.
+        // The dirSource watcher calls readSessions() without scanProjects(),
+        // so newly-created agent sessions may not have cached meta yet.
+        if !teamLeadsByName.isEmpty {
+            for session in loaded {
+                if self.sessionMetaCache[session.session_id] == nil,
+                   let jsonlPath = self.findJSONLPath(sessionId: session.session_id) {
+                    let meta = self.readJSONLHead(path: jsonlPath)
+                    self.sessionMetaCache[session.session_id] = meta
+                }
+            }
+        }
         for i in loaded.indices {
             if let teamName = self.sessionMetaCache[loaded[i].session_id]?.teamName,
                let leadSid = teamLeadsByName[teamName],
@@ -1034,6 +1046,21 @@ class SessionReader: ObservableObject {
                     if parentSessions[i].status != "dead" && parentSessions[i].status != "attention" && parentSessions[i].status != "working" {
                         parentSessions[i].status = "working"
                     }
+                }
+            }
+        }
+
+        // Count linked child sessions per parent and add to agent_count
+        if !childSessions.isEmpty {
+            var childCount: [String: Int] = [:]
+            for child in childSessions {
+                guard let parentSid = child.parent_session_id else { continue }
+                childCount[parentSid, default: 0] += 1
+            }
+            for i in parentSessions.indices {
+                let linked = childCount[parentSessions[i].session_id] ?? 0
+                if linked > 0 {
+                    parentSessions[i].agent_count = max(parentSessions[i].agent_count, linked)
                 }
             }
         }
