@@ -165,6 +165,10 @@ class DirectoryWatcher {
 struct SessionMeta {
     var isSubagent: Bool
     var teamName: String?
+    /// JSONL mtime when this meta was last read; nil means never read or mtime unknown.
+    /// Used to detect when the JSONL has grown past the initial permission-mode entry
+    /// so we can re-read and pick up teamName/agentName written shortly after session start.
+    var jsonlMtime: Date?
 }
 
 // MARK: - Derived Session Data (in-memory, from JSONL scanning)
@@ -408,13 +412,19 @@ class SessionReader: ObservableObject {
 
                     let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
-                    // Read static metadata from head if not already cached
+                    // Read static metadata from head.
+                    // Re-read if: (a) not cached, or (b) cached without definitive info (no
+                    // agentName/teamName found) AND the JSONL mtime has changed — handles the
+                    // race where readJSONLHead ran before the first user message was written.
                     let meta: SessionMeta
-                    if let cached = self.sessionMetaCache[sessionId] {
+                    if let cached = self.sessionMetaCache[sessionId],
+                       cached.isSubagent || cached.teamName != nil || cached.jsonlMtime == mtime {
                         meta = cached
                     } else {
-                        meta = self.readJSONLHead(path: jsonlPath)
-                        self.sessionMetaCache[sessionId] = meta
+                        var m = self.readJSONLHead(path: jsonlPath)
+                        m.jsonlMtime = mtime
+                        self.sessionMetaCache[sessionId] = m
+                        meta = m
                     }
 
                     // Skip subagent sessions entirely
@@ -987,9 +997,16 @@ class SessionReader: ObservableObject {
         // so newly-created agent sessions may not have cached meta yet.
         if !teamLeadsByName.isEmpty {
             for session in loaded {
-                if self.sessionMetaCache[session.session_id] == nil,
+                let cached = self.sessionMetaCache[session.session_id]
+                // Re-read if: (a) not cached, or (b) cached without definitive info and JSONL may
+                // have grown since (we can't check mtime cheaply here, so always retry unconfirmed)
+                let needsRead = cached == nil || (!cached!.isSubagent && cached!.teamName == nil)
+                if needsRead,
                    let jsonlPath = self.findJSONLPath(sessionId: session.session_id) {
-                    let meta = self.readJSONLHead(path: jsonlPath)
+                    let fm = FileManager.default
+                    let mtime = (try? fm.attributesOfItem(atPath: jsonlPath))?[.modificationDate] as? Date
+                    var meta = self.readJSONLHead(path: jsonlPath)
+                    meta.jsonlMtime = mtime
                     self.sessionMetaCache[session.session_id] = meta
                 }
             }
