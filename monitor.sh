@@ -68,16 +68,11 @@ detect_parent_session_id() {
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
         [ -z "$pid" ] || [ "$pid" = "1" ] || [ "$pid" = "0" ] && break
-        local comm
-        comm=$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)
-        if [ "$comm" = "claude" ]; then
-            local args
-            args=$(ps -ww -o args= -p "$pid" 2>/dev/null)
-            if echo "$args" | grep -q -- '--parent-session-id'; then
-                PARENT_SESSION_ID=$(echo "$args" | sed -n 's/.*--parent-session-id[= ]\([^ ]*\).*/\1/p')
-                [ -n "$PARENT_SESSION_ID" ] && return 0
-            fi
-            return 1
+        local args
+        args=$(ps -ww -o args= -p "$pid" 2>/dev/null)
+        if echo "$args" | grep -q -- '--parent-session-id'; then
+            PARENT_SESSION_ID=$(echo "$args" | sed -n 's/.*--parent-session-id[= ]\([^ ]*\).*/\1/p')
+            [ -n "$PARENT_SESSION_ID" ] && return 0
         fi
     done
     return 1
@@ -548,7 +543,12 @@ case "$EVENT" in
                 --arg updated "$NOW" \
                 'if .status == "dead" then . else .status = $status | .updated_at = $updated end'
         fi
-        command -v cmux >/dev/null 2>&1 && cmux notify --title "Claude Code" --body "Session complete: $PROJECT_NAME"
+        # Skip notification for team agent sessions.
+        # detect_parent_session_id is re-checked here as a fallback in case the process
+        # tree wasn't fully established when it ran at script start.
+        if ! detect_parent_session_id; then
+            command -v cmux >/dev/null 2>&1 && cmux notify --title "Claude Code" --body "Session complete: $PROJECT_NAME"
+        fi
         ;;
 
     Notification)
