@@ -7,7 +7,7 @@ import ClaudeMonitorCore
 // MARK: - Terminal Providers (shared across SessionReader + ActiveSessionTracker)
 
 let terminalProviders: [TerminalProvider] = [
-    GhosttyProvider(), CMUXProvider(), ITerm2Provider(), TerminalAppProvider()
+    GhosttyProvider(), CMUXProvider(), ITerm2Provider(), TerminalAppProvider(), T3CodeProvider()
 ]
 
 func providerFor(name: String) -> TerminalProvider? {
@@ -884,6 +884,17 @@ class SessionReader: ObservableObject {
                     }
                     continue
                 }
+                // Phantom filter: no backing JSONL + >60s old → delete and skip
+                if let attrs = try? fm.attributesOfItem(atPath: path),
+                   let mtime = attrs[.modificationDate] as? Date,
+                   isPhantomSession(jsonlExists: findJSONLPath(sessionId: session.session_id) != nil,
+                                    mtimeAge: now.timeIntervalSince(mtime)) {
+                    try? fm.removeItem(atPath: path)
+                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
+                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
+                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context.tmp")
+                    continue
+                }
                 // Session reactivated from "ended" — clear its timestamp
                 endedTimestamps.removeValue(forKey: session.session_id)
                 // Read context_pct from sidecar file
@@ -924,31 +935,16 @@ class SessionReader: ObservableObject {
         self.endedSessionIds.formUnion(disappeared)
         self.previousSessionFileIds = currentFileIds
 
-        // Clean up orphaned sidecar files (.context, .model) with no matching .json,
-        // and stale .lock directories. Only remove if older than 1 day.
-        let oneDayAgo = now.addingTimeInterval(-86400)
+        // Clean up orphaned sidecar files with no matching .json, older than 1 day.
+        let sidecarSuffixes = [".context.tmp", ".json.tmp", ".context", ".model", ".lock"]
         for file in files {
-            let isContext = file.hasSuffix(".context")
-            let isModel = file.hasSuffix(".model")
-            let isLock = file.hasSuffix(".lock")
-            guard isContext || isModel || isLock else { continue }
-
-            let baseName: String
-            if isContext {
-                baseName = String(file.dropLast(8))  // ".context"
-            } else if isModel {
-                baseName = String(file.dropLast(6))  // ".model"
-            } else {
-                baseName = String(file.dropLast(5))  // ".lock"
-            }
-
+            guard let suffix = sidecarSuffixes.first(where: { file.hasSuffix($0) }) else { continue }
+            let baseName = String(file.dropLast(suffix.count))
             let jsonExists = fm.fileExists(atPath: "\(sessionsDir)/\(baseName).json")
-            guard !jsonExists else { continue }
-
             let sidecarPath = "\(sessionsDir)/\(file)"
             if let attrs = try? fm.attributesOfItem(atPath: sidecarPath),
                let mtime = attrs[.modificationDate] as? Date,
-               mtime < oneDayAgo {
+               isStaleTmpSidecar(hasMatchingJson: jsonExists, mtimeAge: now.timeIntervalSince(mtime)) {
                 try? fm.removeItem(atPath: sidecarPath)
             }
         }

@@ -18,6 +18,17 @@ MONITOR_DIR="$HOME/.claude/monitor"
 SESSIONS_DIR="$MONITOR_DIR/sessions"
 mkdir -p "$SESSIONS_DIR"
 
+# Trace: unconditional full hook capture to hook-trace.log (debug switch)
+{
+    TRACE_SID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
+    echo "=== $(date -u +%FT%TZ) EVENT=$EVENT SID=$TRACE_SID ==="
+    echo "-- env (T3/Electron/Claude vars) --"
+    env | grep -E '^(CLAUDE_|ELECTRON_|__CFBundleIdentifier|TERM|ITERM|GHOSTTY|CMUX)' | sort
+    echo "-- stdin JSON --"
+    echo "$INPUT" | jq -c '.' 2>/dev/null || echo "$INPUT"
+    echo
+} >> "$MONITOR_DIR/hook-trace.log" 2>/dev/null
+
 # --- Atomic JSON update helper ---
 # Reads file content into memory THEN pipes to jq, so concurrent invocations
 # can't read a partially-replaced file. Uses mkdir as a portable spinlock.
@@ -49,6 +60,14 @@ update_json_file() {
 # --- Extract context from hook JSON ---
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+
+# Skip T3 Code probe sessions launched at $HOME with the SDK entrypoint — these are
+# ephemeral (<1s) processes T3 spawns for auth/state checks, not user-facing sessions.
+if [ "${__CFBundleIdentifier:-}" = "com.t3tools.t3code" ] \
+   && [ "${CLAUDE_CODE_ENTRYPOINT:-}" = "sdk-ts" ] \
+   && [ "$CWD" = "$HOME" ]; then
+    exit 0
+fi
 
 # Need a session ID to do anything useful
 if [ -z "$SESSION_ID" ]; then
@@ -187,6 +206,19 @@ detect_terminal() {
     if [ -n "${CMUX_SURFACE_ID:-}" ]; then echo "cmux|$tty_id"
     elif [ -n "${ITERM_SESSION_ID:-}" ]; then echo "iterm2|$tty_id"
     elif [ -n "${GHOSTTY_RESOURCES_DIR:-}" ] || [ -n "${GHOSTTY_TERMINAL_UUID:-}" ]; then echo "ghostty|$tty_id"
+    elif [ "${__CFBundleIdentifier:-}" = "com.t3tools.t3code" ] \
+         || { [ "${CLAUDE_CODE_ENTRYPOINT:-}" = "sdk-ts" ] && [ -n "${ELECTRON_RUN_AS_NODE:-}" ]; }; then
+        # T3 Code (Alpha) host — synthetic per-session id to prevent Aggregation collapse.
+        # Walk ancestors to find the claude CLI PID (the hook may run in a nested shell).
+        local cpid=$$ claude_pid=""
+        for _ in 1 2 3 4 5; do
+            cpid=$(ps -o ppid= -p "$cpid" 2>/dev/null | tr -d ' ')
+            [ -z "$cpid" ] || [ "$cpid" = "1" ] && break
+            if [ "$(ps -o comm= -p "$cpid" 2>/dev/null | tr -d ' ')" = "claude" ]; then
+                claude_pid="$cpid"; break
+            fi
+        done
+        echo "t3code|t3-pid-${claude_pid:-$$}"
     elif [ -n "$tty_id" ]; then echo "terminal|$tty_id"
     else echo "|"
     fi
@@ -337,7 +369,19 @@ if [ "$IS_SUBAGENT" = "true" ]; then
                         'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end | if $prompt != "" then .last_prompt = $prompt else . end'
                 fi
                 ;;
-            PreToolUse|PostToolUse|PostToolUseFailure)
+            PreToolUse)
+                TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""')
+                if [ -f "$SESSION_FILE" ]; then
+                    if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
+                        update_json_file "$SESSION_FILE" --arg updated "$NOW" \
+                            '.status = "attention" | .updated_at = $updated'
+                    else
+                        update_json_file "$SESSION_FILE" --arg updated "$NOW" \
+                            'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
+                    fi
+                fi
+                ;;
+            PostToolUse|PostToolUseFailure)
                 if [ -f "$SESSION_FILE" ]; then
                     update_json_file "$SESSION_FILE" --arg updated "$NOW" \
                         'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
@@ -365,7 +409,19 @@ if [ "$IS_SUBAGENT" = "true" ]; then
                     fi
                 fi
                 ;;
-            PreToolUse|PostToolUse|PostToolUseFailure)
+            PreToolUse)
+                TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""')
+                if ensure_subagent_file; then
+                    if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
+                        update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
+                            '.status = "attention" | .updated_at = $updated'
+                    else
+                        update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
+                            'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
+                    fi
+                fi
+                ;;
+            PostToolUse|PostToolUseFailure)
                 if ensure_subagent_file; then
                     update_json_file "$SUBAGENT_SESSION_FILE" --arg updated "$NOW" \
                         'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
@@ -626,7 +682,8 @@ case "$EVENT" in
 
     PostToolUse|PostToolUseFailure)
         # Tool completed — clear attention and set working.
-        # PostToolUse/PostToolUseFailure means user answered any permission prompt.
+        # PostToolUse/PostToolUseFailure means user answered any permission prompt
+        # or finished an AskUserQuestion (T3's prompt mechanism).
         ensure_session_file
         backfill_terminal
         if [ -f "$SESSION_FILE" ]; then
@@ -636,9 +693,30 @@ case "$EVENT" in
         fi
         ;;
 
+    PreToolUse)
+        # T3 (sdk-ts entrypoint) does not fire Notification; it prompts the user via
+        # the AskUserQuestion tool. PreToolUse fires before the user answers, so flip
+        # to attention. PostToolUse (above) clears it back to working.
+        TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""')
+        if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
+            ensure_session_file
+            backfill_terminal
+            if [ -f "$SESSION_FILE" ]; then
+                update_json_file "$SESSION_FILE" \
+                    --arg updated "$NOW" \
+                    'if .status == "dead" then . else .status = "attention" | .updated_at = $updated end'
+            fi
+            command -v cmux >/dev/null 2>&1 && cmux notify --title "Claude Code" --body "Needs attention: $PROJECT_NAME"
+        else
+            # Other PreToolUse: backfill terminal and set working (fires after user
+            # approves a permission prompt, so this also clears attention).
+            backfill_terminal
+            set_working
+        fi
+        ;;
+
     *)
-        # All other events (PreToolUse, etc.):
-        # Backfill terminal info and set working (clears attention — PreToolUse means user approved)
+        # All other events: backfill terminal and set working.
         backfill_terminal
         set_working
         ;;
