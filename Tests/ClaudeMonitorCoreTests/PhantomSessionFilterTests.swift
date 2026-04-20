@@ -51,4 +51,21 @@ final class PhantomSessionFilterTests: XCTestCase {
         // Boundary: exactly 1 day is NOT old enough (> 86400, not ≥)
         XCTAssertFalse(isStaleTmpSidecar(hasMatchingJson: false, mtimeAge: 86400))
     }
+
+    // MARK: - isPhantomHeartbeat
+
+    func testHeartbeatNotPhantomWhenFresh() {
+        // T3Code session with recent heartbeat (<30min) → keep
+        XCTAssertFalse(isPhantomHeartbeat(mtimeAge: 1799))
+    }
+
+    func testHeartbeatPhantomWhenStale() {
+        // T3Code session with stale heartbeat (>30min) → phantom
+        XCTAssertTrue(isPhantomHeartbeat(mtimeAge: 1801))
+    }
+
+    func testHeartbeatNotPhantomAtExactBoundary() {
+        // Boundary: exactly 1800s is NOT phantom (> 1800, not ≥)
+        XCTAssertFalse(isPhantomHeartbeat(mtimeAge: 1800))
+    }
 }
