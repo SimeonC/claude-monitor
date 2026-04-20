@@ -225,12 +225,12 @@ class SessionReader: ObservableObject {
 
     private let monitorDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.claude/monitor"
+        return "\(home)/.claude-monitor"
     }()
 
     private let sessionsDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.claude/monitor/sessions"
+        return "\(home)/.claude-monitor/sessions"
     }()
 
     private let projectsDir: String = {
@@ -547,6 +547,9 @@ class SessionReader: ObservableObject {
                     } else if session.terminal == "ghostty" && session.terminal_session_id.contains("-") {
                         // Backward compat: old sessions with UUID directly in terminal_session_id
                         ghosttyUUIDMap[session.terminal_session_id, default: []].append(session.session_id)
+                    } else if session.terminal == "t3code" {
+                        // T3Code uses synthetic PIDs ("t3-pid-<pid>"), not real TTYs — skip TTY check
+                        continue
                     } else {
                         let ttyName = session.terminal_session_id.replacingOccurrences(
                             of: "/dev/", with: "")
@@ -680,6 +683,7 @@ class SessionReader: ObservableObject {
                 where session.status == "working"
                     && !deadSessionIds.contains(session.session_id)
                     && session.isStale
+                    && session.terminal != "t3code"
                 {
                     NSLog("[ClaudeMonitor] Pruning stuck-working session %@ (%@): no update for 10+ min",
                           session.session_id, session.project)
@@ -884,16 +888,25 @@ class SessionReader: ObservableObject {
                     }
                     continue
                 }
-                // Phantom filter: no backing JSONL + >60s old → delete and skip
+                // Phantom filter: T3 Code uses heartbeat; others require JSONL backing
                 if let attrs = try? fm.attributesOfItem(atPath: path),
-                   let mtime = attrs[.modificationDate] as? Date,
-                   isPhantomSession(jsonlExists: findJSONLPath(sessionId: session.session_id) != nil,
-                                    mtimeAge: now.timeIntervalSince(mtime)) {
-                    try? fm.removeItem(atPath: path)
-                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
-                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
-                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context.tmp")
-                    continue
+                   let mtime = attrs[.modificationDate] as? Date {
+                    let age = now.timeIntervalSince(mtime)
+                    let phantom: Bool
+                    if session.terminal == "t3code" {
+                        phantom = isPhantomHeartbeat(mtimeAge: age)
+                    } else {
+                        phantom = isPhantomSession(
+                            jsonlExists: findJSONLPath(sessionId: session.session_id) != nil,
+                            mtimeAge: age)
+                    }
+                    if phantom {
+                        try? fm.removeItem(atPath: path)
+                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
+                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
+                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context.tmp")
+                        continue
+                    }
                 }
                 // Session reactivated from "ended" — clear its timestamp
                 endedTimestamps.removeValue(forKey: session.session_id)
@@ -1104,7 +1117,7 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Write current pipeline state to ~/.claude/monitor/debug.json for diagnosis.
+    /// Write current pipeline state to ~/.claude-monitor/debug.json for diagnosis.
     private func dumpDebugState(aggregated: [SessionInfo]) {
         let debugPath = "\(sessionsDir)/../debug.json"
         let isoFmt = ISO8601DateFormatter()
@@ -1297,7 +1310,7 @@ class ActiveSessionTracker: ObservableObject {
 
 // MARK: - Debug Logging
 
-private let debugLogPath = NSHomeDirectory() + "/.claude/monitor/debug.log"
+private let debugLogPath = NSHomeDirectory() + "/.claude-monitor/debug.log"
 
 func debugLog(_ message: String) {
     let timestamp = ISO8601DateFormatter().string(from: Date())

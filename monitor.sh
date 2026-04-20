@@ -14,7 +14,7 @@ INPUT=$(cat)
 EVENT="${1:-$(echo "$INPUT" | jq -r '.hook_event_name // "unknown"')}"
 
 # --- Paths ---
-MONITOR_DIR="$HOME/.claude/monitor"
+MONITOR_DIR="$HOME/.claude-monitor"
 SESSIONS_DIR="$MONITOR_DIR/sessions"
 mkdir -p "$SESSIONS_DIR"
 

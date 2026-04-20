@@ -36,7 +36,7 @@ The agent sessions are correctly tagged in their JSONL files:
 
 ### Session JSON Files Status ✗ **PROBLEM**
 
-The issue is in the session JSON files in `~/.claude/monitor/sessions/`:
+The issue is in the session JSON files in `~/.claude-monitor/sessions/`:
 
 **Session 44e5ca5b-a0e3-4cab-922f-3ceee6058f6e.json** (Lead)
 ```json
@@ -155,7 +155,7 @@ func applicationDidFinishLaunching(...) {
 2. **Data**:
    - Team config: `~/.claude/teams/decoration-phase0/config.json`
    - JSONL files: `~/.claude/projects/-workspaces-svg-floor-plan/*.jsonl`
-   - Session files: `~/.claude/monitor/sessions/*.json`
+   - Session files: `~/.claude-monitor/sessions/*.json`
 
 ## Debug Steps to Verify
 

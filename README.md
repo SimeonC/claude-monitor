@@ -151,7 +151,7 @@ The UUID is captured once when the Ghostty tab opens (when it's definitively foc
 
 ```bash
 pkill claude_monitor
-rm -rf ~/.claude/monitor ~/.claude/hooks/monitor.sh
+rm -rf ~/.claude-monitor ~/.claude/hooks/monitor.sh
 launchctl bootout "gui/$(id -u)/com.claude.monitor" 2>/dev/null
 rm -f ~/Library/LaunchAgents/com.claude.monitor.plist
 ```
@@ -168,7 +168,7 @@ If you use [cmux](https://cmux.dev), two extra steps are needed for click-to-swi
 
 ## How It Works
 
-Claude Code hooks fire on session events → `monitor.sh` writes session JSON to `~/.claude/monitor/sessions/` → the Swift app detects changes via FSEvents and updates the floating panel. Session files are never deleted — status transitions replace destructive removal to prevent race conditions in concurrent hooks.
+Claude Code hooks fire on session events → `monitor.sh` writes session JSON to `~/.claude-monitor/sessions/` → the Swift app detects changes via FSEvents and updates the floating panel. Session files are never deleted — status transitions replace destructive removal to prevent race conditions in concurrent hooks.
 
 ## Credits
 

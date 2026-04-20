@@ -6,7 +6,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
-MONITOR_DIR="$CLAUDE_HOME/monitor"
+MONITOR_DIR="$HOME/.claude-monitor"
 HOOKS_DIR="$CLAUDE_HOME/hooks"
 LABEL="com.claude.monitor"
 APP_BUNDLE="$MONITOR_DIR/Claude Code Monitor.app"
@@ -16,6 +16,15 @@ SETTINGS_FILE="$CLAUDE_HOME/settings.json"
 
 # --- 1. Dirs ---
 mkdir -p "$MONITOR_DIR/sessions" "$HOOKS_DIR"
+
+# Migrate old monitor directory if it exists
+OLD_MONITOR_DIR="$CLAUDE_HOME/monitor"
+if [ -d "$OLD_MONITOR_DIR" ]; then
+    echo "Migrating $OLD_MONITOR_DIR → $MONITOR_DIR"
+    shopt -s dotglob 2>/dev/null || true
+    mv "$OLD_MONITOR_DIR"/* "$MONITOR_DIR"/ 2>/dev/null || true
+    rmdir "$OLD_MONITOR_DIR" 2>/dev/null || true
+fi
 
 # --- 2. Config (only if missing) ---
 if [ ! -f "$MONITOR_DIR/config.json" ]; then

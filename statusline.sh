@@ -5,6 +5,7 @@
 
 input=$(cat)
 
+SESSIONS_DIR="$HOME/.claude-monitor/sessions"
 session_id=$(echo "$input" | jq -r '.session_id // empty')
 used=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
 remaining=$(echo "$input" | jq -r '.context_window.remaining_percentage // empty')
@@ -12,8 +13,8 @@ model=$(echo "$input" | jq -r '.model.display_name // empty')
 
 # Write context_pct to sidecar file (avoids TOCTOU race with monitor.sh on session JSON)
 if [ -n "$session_id" ] && [ -n "$used" ]; then
-    CONTEXT_FILE="$HOME/.claude/monitor/sessions/${session_id}.context"
-    SESSION_FILE="$HOME/.claude/monitor/sessions/${session_id}.json"
+    CONTEXT_FILE="$SESSIONS_DIR/${session_id}.context"
+    SESSION_FILE="$SESSIONS_DIR/${session_id}.json"
     new_pct=$(printf "%.0f" "$used")
 
     # Detect context reset (/clear): context drops from >10% to <5%
@@ -31,7 +32,7 @@ if [ -n "$session_id" ] && [ -n "$used" ]; then
 
     # Write model name to sidecar file
     if [ -n "$model" ]; then
-        MODEL_FILE="$HOME/.claude/monitor/sessions/${session_id}.model"
+        MODEL_FILE="$SESSIONS_DIR/${session_id}.model"
         printf "%s" "$model" > "${MODEL_FILE}.tmp" && mv "${MODEL_FILE}.tmp" "$MODEL_FILE"
     fi
 fi
