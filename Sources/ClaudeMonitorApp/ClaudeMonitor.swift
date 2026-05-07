@@ -37,14 +37,21 @@ class TeamReader: ObservableObject {
         return "\(home)/.claude/tasks"
     }()
 
+    private let ioQueue = DispatchQueue(label: "com.claudemonitor.teamio", qos: .userInitiated)
+    private lazy var readDebouncer = Debouncer(delay: 0.25, queue: ioQueue)
+
     init() {
-        readTeams()
+        ioQueue.async { [weak self] in self?._readTeamsOnIOQueue() }
         watcher = DirectoryWatcher(paths: [teamsDir, tasksDir], latency: 0.5) { [weak self] in
-            DispatchQueue.main.async { self?.readTeams() }
+            self?.readDebouncer.schedule { self?._readTeamsOnIOQueue() }
         }
     }
 
     func readTeams() {
+        ioQueue.async { [weak self] in self?._readTeamsOnIOQueue() }
+    }
+
+    private func _readTeamsOnIOQueue() {
         let fm = FileManager.default
         guard let teamDirs = try? fm.contentsOfDirectory(atPath: teamsDir) else {
             DispatchQueue.main.async { self.teamsBySession = [:] }
@@ -143,7 +150,10 @@ class DirectoryWatcher {
         )
 
         if let stream = stream {
-            FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
+            FSEventStreamSetDispatchQueue(
+                stream,
+                DispatchQueue(label: "com.claudemonitor.fsevents", qos: .userInitiated)
+            )
             FSEventStreamStart(stream)
         }
     }
@@ -160,6 +170,27 @@ class DirectoryWatcher {
     deinit { stop() }
 }
 
+// MARK: - Debouncer
+
+/// Coalesces rapid calls into a single trailing-edge fire after `delay` seconds.
+final class Debouncer {
+    private let delay: TimeInterval
+    private let queue: DispatchQueue
+    private var workItem: DispatchWorkItem?
+
+    init(delay: TimeInterval, queue: DispatchQueue = DispatchQueue.main) {
+        self.delay = delay
+        self.queue = queue
+    }
+
+    func schedule(_ block: @escaping () -> Void) {
+        workItem?.cancel()
+        let item = DispatchWorkItem(block: block)
+        workItem = item
+        queue.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+}
+
 // MARK: - Session Metadata (from JSONL head — static, cached across scan cycles)
 
 struct SessionMeta {
@@ -169,6 +200,15 @@ struct SessionMeta {
     /// Used to detect when the JSONL has grown past the initial permission-mode entry
     /// so we can re-read and pick up teamName/agentName written shortly after session start.
     var jsonlMtime: Date?
+}
+
+// MARK: - Session File Cache (mtime-keyed, avoids repeated JSON decode for unchanged files)
+
+private struct SessionFileSnapshot {
+    var jsonMtime: Date
+    var contextMtime: Date?
+    var modelMtime: Date?
+    var info: SessionInfo
 }
 
 // MARK: - Derived Session Data (in-memory, from JSONL scanning)
@@ -187,7 +227,6 @@ struct DerivedSessionData {
 class SessionReader: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     private var livenessTimer: Timer?
-    private var refreshTimer: Timer?
     private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
     /// JSONL-derived data held in memory (never written to session files)
@@ -201,17 +240,28 @@ class SessionReader: ObservableObject {
     private var previousSessionFileIds: Set<String> = []
     /// Serial queue for all disk I/O and state mutations (keeps main thread free for UI)
     private let ioQueue = DispatchQueue(label: "com.claudemonitor.sessionio", qos: .userInitiated)
-    /// Guards to prevent overlapping scan/prune dispatches when a cycle takes longer than the timer interval
-    private var scanQueued = false
-    private var pruneQueued = false
+    /// Coalesces burst FSEvents + liveness triggers into a single trailing-edge readSessions call
+    private lazy var readDebouncer = Debouncer(delay: 0.25, queue: ioQueue)
+    /// Coalesces burst FSEvents into a single trailing-edge scanProjects call
+    private lazy var scanDebouncer = Debouncer(delay: 0.25, queue: ioQueue)
 
     /// TTY → Ghostty UUID mapping for click-to-switch (loaded from tty_map.json)
     private(set) var ttyMap: [String: String] = [:]
     /// Tmux session name → Ghostty UUID mapping (loaded from tmux_map.json)
     private(set) var tmuxMap: [String: String] = [:]
+    /// Last-seen mtime of tty_map.json; nil means not yet loaded
+    private var ttyMapMtime: Date?
+    /// Last-seen mtime of tmux_map.json; nil means not yet loaded
+    private var tmuxMapMtime: Date?
+
+    /// Per-session JSON file cache: session_id → snapshot keyed by file mtimes
+    private var sessionFileCache: [String: SessionFileSnapshot] = [:]
 
     /// Per-session static metadata from JSONL head (isSubagent, teamName). Persists across scan cycles.
     private var sessionMetaCache: [String: SessionMeta] = [:]
+
+    /// Timestamp of the last dumpDebugState write; used to rate-limit to ≤ 1 write/sec
+    private var lastDebugDumpAt: Date = .distantPast
 
     /// Reference to TeamReader for looking up team lead session IDs
     weak var teamReader: TeamReader? {
@@ -244,28 +294,35 @@ class SessionReader: ObservableObject {
         scanProjects()
         readSessions()
 
-        // FSEvents: reload when session files change (1s coalescing to avoid flicker)
+        // FSEvents: reload when session files change (debounced via readDebouncer)
         dirSource = DirectoryWatcher(paths: [sessionsDir], latency: 1.0) { [weak self] in
-            self?.readSessions()
+            self?.scheduleRead()
         }
 
-        // FSEvents on projects dir: detect new/changed JSONL files
+        // FSEvents on projects dir: detect new/changed JSONL files (debounced)
         projectsWatcher = DirectoryWatcher(paths: [projectsDir], latency: 1.0) { [weak self] in
-            self?.scanProjects()
-            self?.readSessions()
+            self?.scheduleScanAndRead()
         }
 
-        // Liveness timer: prune dead sessions (absence of writes can't trigger FSEvents)
-        livenessTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) {
+        // Liveness timer: prune dead sessions every 10s (FSEvents can't detect absence of writes)
+        livenessTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) {
             [weak self] _ in
             self?.pruneDeadSessions()
         }
+    }
 
-        // Periodic refresh: pick up changes even if FSEvents misses them
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) {
-            [weak self] _ in
-            self?.scanProjects()
-            self?.readSessions()
+    private func scheduleRead() {
+        readDebouncer.schedule { [weak self] in
+            guard let self = self else { return }
+            self._readSessionsOnIOQueue(teamLeadsByName: self.teamReader?.leadSessionByTeamName ?? [:])
+        }
+    }
+
+    private func scheduleScanAndRead() {
+        scanDebouncer.schedule { [weak self] in
+            guard let self = self else { return }
+            self._scanProjectsOnIOQueue()
+            self._readSessionsOnIOQueue(teamLeadsByName: self.teamReader?.leadSessionByTeamName ?? [:])
         }
     }
 
@@ -383,12 +440,13 @@ class SessionReader: ObservableObject {
     /// Static subagent/teamName metadata is read from the JSONL head and cached in sessionMetaCache.
     /// No session files are written — readSessions() merges this data at display time.
     func scanProjects() {
-        guard !scanQueued else { return }
-        scanQueued = true
         ioQueue.async { [weak self] in
-            guard let self = self else { return }
-            defer { self.scanQueued = false }
-            let fm = FileManager.default
+            self?._scanProjectsOnIOQueue()
+        }
+    }
+
+    private func _scanProjectsOnIOQueue() {
+        let fm = FileManager.default
             guard let projectDirs = try? fm.contentsOfDirectory(atPath: self.projectsDir) else { return }
             let now = Date()
             let twoMinAgo = now.addingTimeInterval(-120)
@@ -449,7 +507,7 @@ class SessionReader: ObservableObject {
                     // Skip if still no cwd (session file not yet written)
                     if cwd.isEmpty { continue }
 
-                    let project = (cwd as NSString).lastPathComponent
+                    let project = deriveProject(cwd: cwd, home: FileManager.default.homeDirectoryForCurrentUser.path)
 
                     // Count active subagents
                     let subagentsDir = "\(projectPath)/\(sessionId)/subagents"
@@ -488,16 +546,12 @@ class SessionReader: ObservableObject {
                     self.sessionMetaCache.removeValue(forKey: sid)
                 }
             }
-        }
     }
 
     /// Detect dead sessions and delete their files from disk.
     func pruneDeadSessions() {
-        guard !pruneQueued else { return }
-        pruneQueued = true
         ioQueue.async { [weak self] in
             guard let self = self else { return }
-            defer { self.pruneQueued = false }
             let fm = FileManager.default
             guard let files = try? fm.contentsOfDirectory(atPath: self.sessionsDir) else { return }
             var currentSessions: [(session: SessionInfo, path: String)] = []
@@ -719,8 +773,10 @@ class SessionReader: ObservableObject {
                         try? fm.removeItem(atPath: "\(sessionsDir)/\(sid).model")
                         NSLog("[ClaudeMonitor] Deleted dead session %@", sid)
                     }
+                    if !deadSessionIds.isEmpty {
+                        self._readSessionsOnIOQueue(teamLeadsByName: self.teamReader?.leadSessionByTeamName ?? [:])
+                    }
                 }
-                self.readSessions()
             }
         }
     }
@@ -857,10 +913,45 @@ class SessionReader: ObservableObject {
 
         for file in files where file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
+            let sessionId = String(file.dropLast(5)) // filename = <session_id>.json
+
+            // Stat JSON file first (needed for phantom filter and mtime cache check)
+            guard let jsonAttrs = try? fm.attributesOfItem(atPath: path),
+                  let jsonMtime = jsonAttrs[.modificationDate] as? Date
+            else { continue }
+
+            let contextPath = "\(sessionsDir)/\(sessionId).context"
+            let modelPath = "\(sessionsDir)/\(sessionId).model"
+            let contextMtime = (try? fm.attributesOfItem(atPath: contextPath))?[.modificationDate] as? Date
+            let modelMtime = (try? fm.attributesOfItem(atPath: modelPath))?[.modificationDate] as? Date
+
+            // Fast path: all mtimes unchanged → reuse cached SessionInfo (skip JSON decode + sidecar reads)
+            if let snap = sessionFileCache[sessionId],
+               snap.jsonMtime == jsonMtime,
+               snap.contextMtime == contextMtime,
+               snap.modelMtime == modelMtime
+            {
+                currentFileIds.insert(sessionId)
+                endedTimestamps.removeValue(forKey: sessionId)
+                var enriched = snap.info
+                if let derived = derivedData[sessionId] {
+                    if enriched.project == "unknown" || enriched.cwd.isEmpty {
+                        enriched.project = derived.project
+                        enriched.cwd = derived.cwd
+                    }
+                    enriched.agent_count = derived.agentCount
+                }
+                loaded.append(enriched)
+                loadedIds.insert(sessionId)
+                continue
+            }
+
+            // Slow path: read and decode
             guard let data = fm.contents(atPath: path) else { continue }
             // Delete empty/corrupt session files so the hook can recreate them
             if data.isEmpty {
                 try? fm.removeItem(atPath: path)
+                sessionFileCache.removeValue(forKey: sessionId)
                 continue
             }
             do {
@@ -869,8 +960,9 @@ class SessionReader: ObservableObject {
                 // Dead sessions: delete from disk and skip
                 if session.status == "dead" {
                     try? fm.removeItem(atPath: path)
-                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
-                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
+                    try? fm.removeItem(atPath: contextPath)
+                    try? fm.removeItem(atPath: modelPath)
+                    sessionFileCache.removeValue(forKey: sessionId)
                     continue
                 }
                 // Ended sessions: don't show in UI; give 5s grace for SessionStart to reactivate
@@ -881,51 +973,52 @@ class SessionReader: ObservableObject {
                     if now.timeIntervalSince(endedTimestamps[session.session_id]!) >= 5 {
                         // Grace period expired — clean up
                         try? fm.removeItem(atPath: path)
-                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
-                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
+                        try? fm.removeItem(atPath: contextPath)
+                        try? fm.removeItem(atPath: modelPath)
                         endedTimestamps.removeValue(forKey: session.session_id)
                         endedSessionIds.insert(session.session_id)
                     }
+                    sessionFileCache.removeValue(forKey: sessionId)
                     continue
                 }
                 // Phantom filter: T3 Code uses heartbeat; others require JSONL backing
-                if let attrs = try? fm.attributesOfItem(atPath: path),
-                   let mtime = attrs[.modificationDate] as? Date {
-                    let age = now.timeIntervalSince(mtime)
-                    let phantom: Bool
-                    if session.terminal == "t3code" {
-                        phantom = isPhantomHeartbeat(mtimeAge: age)
-                    } else {
-                        phantom = isPhantomSession(
-                            jsonlExists: findJSONLPath(sessionId: session.session_id) != nil,
-                            mtimeAge: age)
-                    }
-                    if phantom {
-                        try? fm.removeItem(atPath: path)
-                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context")
-                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).model")
-                        try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context.tmp")
-                        continue
-                    }
+                let age = now.timeIntervalSince(jsonMtime)
+                let phantom: Bool
+                if session.terminal == "t3code" {
+                    phantom = isPhantomHeartbeat(mtimeAge: age)
+                } else {
+                    let jsonlExists = derivedData[session.session_id]?.jsonlPath != nil
+                        || (derivedData[session.session_id] == nil && findJSONLPath(sessionId: session.session_id) != nil)
+                    phantom = isPhantomSession(jsonlExists: jsonlExists, mtimeAge: age)
+                }
+                if phantom {
+                    try? fm.removeItem(atPath: path)
+                    try? fm.removeItem(atPath: contextPath)
+                    try? fm.removeItem(atPath: modelPath)
+                    try? fm.removeItem(atPath: "\(sessionsDir)/\(session.session_id).context.tmp")
+                    sessionFileCache.removeValue(forKey: sessionId)
+                    continue
                 }
                 // Session reactivated from "ended" — clear its timestamp
                 endedTimestamps.removeValue(forKey: session.session_id)
                 // Read context_pct from sidecar file
-                let contextPath = "\(sessionsDir)/\(session.session_id).context"
                 if let contextData = fm.contents(atPath: contextPath),
                    let contextStr = String(data: contextData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    let pct = Int(contextStr) {
                     session.context_pct = pct
                 }
                 // Read model from sidecar file
-                let modelPath = "\(sessionsDir)/\(session.session_id).model"
                 if let modelData = fm.contents(atPath: modelPath),
                    let modelStr = String(data: modelData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !modelStr.isEmpty {
                     session.model = modelStr
                 }
+                // Update session file cache (before derivedData enrichment — agent_count re-applied each cycle)
+                sessionFileCache[sessionId] = SessionFileSnapshot(
+                    jsonMtime: jsonMtime, contextMtime: contextMtime, modelMtime: modelMtime,
+                    info: session
+                )
                 // Enrich with JSONL-derived data (project, cwd, agent_count)
-                // last_prompt is now authoritative from the session JSON (written by hook at UserPromptSubmit)
                 if let derived = derivedData[session.session_id] {
                     if session.project == "unknown" || session.cwd.isEmpty {
                         session.project = derived.project
@@ -940,6 +1033,7 @@ class SessionReader: ObservableObject {
                     "[ClaudeMonitor] Deleting corrupt session file %@: %@", file,
                     error.localizedDescription)
                 try? fm.removeItem(atPath: path)
+                sessionFileCache.removeValue(forKey: sessionId)
             }
         }
 
@@ -947,6 +1041,8 @@ class SessionReader: ObservableObject {
         let disappeared = self.previousSessionFileIds.subtracting(currentFileIds)
         self.endedSessionIds.formUnion(disappeared)
         self.previousSessionFileIds = currentFileIds
+        // Evict stale cache entries for files that no longer exist
+        for sid in disappeared { sessionFileCache.removeValue(forKey: sid) }
 
         // Clean up orphaned sidecar files with no matching .json, older than 1 day.
         let sidecarSuffixes = [".context.tmp", ".json.tmp", ".context", ".model", ".lock"]
@@ -962,18 +1058,26 @@ class SessionReader: ObservableObject {
             }
         }
 
-        // Load TTY → Ghostty UUID mapping
+        // Load TTY → Ghostty UUID mapping (skip if file unchanged)
         let ttyMapPath = "\(monitorDir)/tty_map.json"
-        if let ttyMapData = fm.contents(atPath: ttyMapPath),
-           let decoded = try? JSONSerialization.jsonObject(with: ttyMapData) as? [String: String] {
-            self.ttyMap = decoded
+        let newTtyMapMtime = (try? fm.attributesOfItem(atPath: ttyMapPath))?[.modificationDate] as? Date
+        if newTtyMapMtime != ttyMapMtime {
+            if let ttyMapData = fm.contents(atPath: ttyMapPath),
+               let decoded = try? JSONSerialization.jsonObject(with: ttyMapData) as? [String: String] {
+                self.ttyMap = decoded
+                self.ttyMapMtime = newTtyMapMtime
+            }
         }
 
-        // Load tmux session → Ghostty UUID mapping
+        // Load tmux session → Ghostty UUID mapping (skip if file unchanged)
         let tmuxMapPath = "\(monitorDir)/tmux_map.json"
-        if let tmuxMapData = fm.contents(atPath: tmuxMapPath),
-           let decoded = try? JSONSerialization.jsonObject(with: tmuxMapData) as? [String: String] {
-            self.tmuxMap = decoded
+        let newTmuxMapMtime = (try? fm.attributesOfItem(atPath: tmuxMapPath))?[.modificationDate] as? Date
+        if newTmuxMapMtime != tmuxMapMtime {
+            if let tmuxMapData = fm.contents(atPath: tmuxMapPath),
+               let decoded = try? JSONSerialization.jsonObject(with: tmuxMapData) as? [String: String] {
+                self.tmuxMap = decoded
+                self.tmuxMapMtime = newTmuxMapMtime
+            }
         }
 
         // Recovery: for derivedData entries with active JSONL but no session file,
@@ -1007,15 +1111,16 @@ class SessionReader: ObservableObject {
         if !teamLeadsByName.isEmpty {
             for session in loaded {
                 let cached = self.sessionMetaCache[session.session_id]
-                // Re-read if: (a) not cached, or (b) cached without definitive info and JSONL may
-                // have grown since (we can't check mtime cheaply here, so always retry unconfirmed)
+                // Re-read only if: (a) not cached, or (b) cached without definitive info AND
+                // JSONL mtime has changed since last read (file grew past the initial permission entry)
                 let needsRead = cached == nil || (!cached!.isSubagent && cached!.teamName == nil)
                 if needsRead,
                    let jsonlPath = self.findJSONLPath(sessionId: session.session_id) {
-                    let fm = FileManager.default
-                    let mtime = (try? fm.attributesOfItem(atPath: jsonlPath))?[.modificationDate] as? Date
+                    let currentMtime = (try? fm.attributesOfItem(atPath: jsonlPath))?[.modificationDate] as? Date
+                    // Skip re-read if mtime hasn't changed (file hasn't grown)
+                    guard cached == nil || currentMtime != cached?.jsonlMtime else { continue }
                     var meta = self.readJSONLHead(path: jsonlPath)
-                    meta.jsonlMtime = mtime
+                    meta.jsonlMtime = currentMtime
                     self.sessionMetaCache[session.session_id] = meta
                 }
             }
@@ -1025,8 +1130,7 @@ class SessionReader: ObservableObject {
                let leadSid = teamLeadsByName[teamName],
                loadedIds.contains(leadSid) {
                 loaded[i].parent_session_id = leadSid
-                NSLog("[ClaudeMonitor] Linked agent %@ (team: %@) → lead %@",
-                      loaded[i].session_id, teamName, leadSid)
+                debugLog("Linked agent \(loaded[i].session_id) (team: \(teamName)) → lead \(leadSid)")
             }
         }
 
@@ -1109,11 +1213,15 @@ class SessionReader: ObservableObject {
             return $0.cwd.localizedCaseInsensitiveCompare($1.cwd) == .orderedAscending
         }
 
-        // Debug: dump pipeline state to JSON for diagnosing status bugs
-        dumpDebugState(aggregated: aggregated)
+        // Debug: dump pipeline state to JSON (rate-limited to ≤1 write/sec)
+        let sinceLastDump = now.timeIntervalSince(lastDebugDumpAt)
+        if sinceLastDump >= 1.0 {
+            lastDebugDumpAt = now
+            dumpDebugState(aggregated: aggregated)
+        }
 
         DispatchQueue.main.async {
-            self.sessions = aggregated
+            if self.sessions != aggregated { self.sessions = aggregated }
         }
     }
 
@@ -1311,11 +1419,13 @@ class ActiveSessionTracker: ObservableObject {
 // MARK: - Debug Logging
 
 private let debugLogPath = NSHomeDirectory() + "/.claude-monitor/debug.log"
+private let debugLogQueue = DispatchQueue(label: "com.claudemonitor.debuglog", qos: .utility)
 
 func debugLog(_ message: String) {
     let timestamp = ISO8601DateFormatter().string(from: Date())
     let line = "[\(timestamp)] \(message)\n"
-    if let data = line.data(using: .utf8) {
+    debugLogQueue.async {
+        guard let data = line.data(using: .utf8) else { return }
         if let fh = FileHandle(forWritingAtPath: debugLogPath) {
             fh.seekToEndOfFile()
             fh.write(data)
@@ -1797,62 +1907,51 @@ struct HeaderBar: View {
 
 // MARK: - Main Content View
 
+/// Build a map of session_id → short disambiguating suffix for sessions that share a project name.
+/// Computed once per sessions-array change; passed into the view rather than re-evaluated on every body call.
+func buildDisambiguationMap(_ sessions: [SessionInfo]) -> [String: String] {
+    var byProject: [String: [SessionInfo]] = [:]
+    for s in sessions { byProject[s.project, default: []].append(s) }
+
+    var result: [String: String] = [:]
+    for (_, group) in byProject {
+        guard group.count > 1 else { continue }
+
+        let paths: [(SessionInfo, [String])] = group.map { s in
+            var comps = s.cwd.split(separator: "/").map(String.init)
+            if !comps.isEmpty { comps.removeLast() }
+            return (s, comps)
+        }
+
+        let minLen = paths.map(\.1.count).min() ?? 0
+        var diffIdx: Int? = nil
+        for i in stride(from: minLen - 1, through: 0, by: -1) {
+            if Set(paths.map { $0.1[i] }).count > 1 { diffIdx = i; break }
+        }
+
+        if let idx = diffIdx {
+            for (session, comps) in paths {
+                result[session.session_id] = "\(comps[idx])/\(session.project)"
+            }
+        } else {
+            for (session, _) in paths { result[session.session_id] = session.cwd }
+        }
+    }
+    return result
+}
+
 struct MonitorContentView: View {
     @ObservedObject var reader: SessionReader
     @ObservedObject var teamReader: TeamReader
     @ObservedObject var shortcutManager: ShortcutManager
     @ObservedObject var activeTracker: ActiveSessionTracker
     @State private var isExpanded = true
-
-    /// Build a map of session_id → short disambiguating suffix for sessions that share a project name.
-    /// Uses first-letter abbreviation of the first differing path component walking upward.
-    private var disambiguationMap: [String: String] {
-        // Group sessions by project name
-        var byProject: [String: [SessionInfo]] = [:]
-        for s in reader.sessions {
-            byProject[s.project, default: []].append(s)
-        }
-
-        var result: [String: String] = [:]
-        for (_, group) in byProject {
-            guard group.count > 1 else { continue }
-
-            // Split each cwd into path components (drop the project basename at the end)
-            let paths: [(SessionInfo, [String])] = group.map { s in
-                var comps = s.cwd.split(separator: "/").map(String.init)
-                if !comps.isEmpty { comps.removeLast() } // drop basename (== project)
-                return (s, comps)
-            }
-
-            // Walk from the end of the parent path upward to find the first diverging component
-            let minLen = paths.map(\.1.count).min() ?? 0
-            var diffIdx: Int? = nil
-            for i in stride(from: minLen - 1, through: 0, by: -1) {
-                let vals = Set(paths.map { $0.1[i] })
-                if vals.count > 1 {
-                    diffIdx = i
-                    break
-                }
-            }
-
-            if let idx = diffIdx {
-                for (session, comps) in paths {
-                    let diffComp = comps[idx]
-                    result[session.session_id] = "\(diffComp)/\(session.project)"
-                }
-            } else {
-                // All parent paths identical — fall back to full cwd
-                for (session, _) in paths {
-                    result[session.session_id] = session.cwd
-                }
-            }
-        }
-        return result
-    }
+    /// Cached per-session disambiguation suffixes — recomputed only when sessions array changes.
+    @State private var disambiguationMap: [String: String] = [:]
+    /// Cached team-info lookup — rebuilt once per sessions change to avoid per-row calls.
+    @State private var teamInfoMap: [String: TeamInfo] = [:]
 
     var body: some View {
-        let disambigMap = disambiguationMap
-
         VStack(spacing: 0) {
             // Header — always visible, drag to move
             HeaderBar(
@@ -1868,9 +1967,9 @@ struct MonitorContentView: View {
                         ForEach(reader.sessions) { session in
                             SessionRowView(
                                 session: session,
-                                teamInfo: teamReader.teamInfo(for: session),
+                                teamInfo: teamInfoMap[session.session_id],
                                 isActive: session.session_id == activeTracker.activeSessionId,
-                                disambiguationSuffix: disambigMap[session.session_id]
+                                disambiguationSuffix: disambiguationMap[session.session_id]
                             )
                             .overlay(
                                 FirstMouseClickArea(
@@ -1914,6 +2013,21 @@ struct MonitorContentView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
         )
+        .onReceive(reader.$sessions) { newSessions in
+            disambiguationMap = buildDisambiguationMap(newSessions)
+            var tmap: [String: TeamInfo] = [:]
+            for s in newSessions {
+                if let info = teamReader.teamInfo(for: s) { tmap[s.session_id] = info }
+            }
+            teamInfoMap = tmap
+        }
+        .onReceive(teamReader.$teamsBySession) { _ in
+            var tmap: [String: TeamInfo] = [:]
+            for s in reader.sessions {
+                if let info = teamReader.teamInfo(for: s) { tmap[s.session_id] = info }
+            }
+            teamInfoMap = tmap
+        }
     }
 }
 
