@@ -112,6 +112,38 @@ final class SessionInfoTests: XCTestCase {
         XCTAssertEqual(makeSession(status: "custom_status").displayStatus, "custom_status")
     }
 
+    // MARK: - Equatable
+
+    func testEqualSessionsAreEqual() {
+        let s1 = SessionInfo(
+            session_id: "abc", status: "idle", project: "p", cwd: "/p",
+            terminal: "ghostty", terminal_session_id: "tty1",
+            started_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T01:00:00Z",
+            last_prompt: "hello", agent_count: 2
+        )
+        let s2 = SessionInfo(
+            session_id: "abc", status: "idle", project: "p", cwd: "/p",
+            terminal: "ghostty", terminal_session_id: "tty1",
+            started_at: "2024-01-01T00:00:00Z", updated_at: "2024-01-01T01:00:00Z",
+            last_prompt: "hello", agent_count: 2
+        )
+        XCTAssertEqual(s1, s2)
+    }
+
+    func testDifferentStatusNotEqual() {
+        let s1 = makeSession(status: "idle")
+        var s2 = s1
+        s2.status = "working"
+        XCTAssertNotEqual(s1, s2)
+    }
+
+    func testSessionsArrayEqualityGatePublish() {
+        let s = makeSession(status: "idle")
+        let a1: [SessionInfo] = [s]
+        let a2: [SessionInfo] = [s]
+        XCTAssertEqual(a1, a2)
+    }
+
     // MARK: - skip_permissions decoding
 
     func testDecodeWithSkipPermissionsTrue() throws {

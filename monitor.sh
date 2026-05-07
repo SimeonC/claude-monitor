@@ -18,16 +18,20 @@ MONITOR_DIR="$HOME/.claude-monitor"
 SESSIONS_DIR="$MONITOR_DIR/sessions"
 mkdir -p "$SESSIONS_DIR"
 
-# Trace: unconditional full hook capture to hook-trace.log (debug switch)
-{
-    TRACE_SID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
-    echo "=== $(date -u +%FT%TZ) EVENT=$EVENT SID=$TRACE_SID ==="
-    echo "-- env (T3/Electron/Claude vars) --"
-    env | grep -E '^(CLAUDE_|ELECTRON_|__CFBundleIdentifier|TERM|ITERM|GHOSTTY|CMUX)' | sort
-    echo "-- stdin JSON --"
-    echo "$INPUT" | jq -c '.' 2>/dev/null || echo "$INPUT"
-    echo
-} >> "$MONITOR_DIR/hook-trace.log" 2>/dev/null
+# Trace: full hook capture to hook-trace.log — only for T3 Code sessions (debug switch)
+# if [ "${__CFBundleIdentifier:-}" = "com.t3tools.t3code" ]; then
+#     {
+#         TRACE_SID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
+#         echo "=== $(date -u +%FT%TZ) EVENT=$EVENT SID=$TRACE_SID ==="
+#         echo "-- full env --"
+#         env | sort
+#         echo "-- env (T3/Electron/Claude vars) --"
+#         env | grep -E '^(CLAUDE_|ELECTRON_|__CFBundleIdentifier|TERM|ITERM|GHOSTTY|CMUX)' | sort
+#         echo "-- stdin JSON --"
+#         echo "$INPUT" | jq -c '.' 2>/dev/null || echo "$INPUT"
+#         echo
+#     } >> "$MONITOR_DIR/hook-trace.log" 2>/dev/null
+# fi
 
 # --- Atomic JSON update helper ---
 # Reads file content into memory THEN pipes to jq, so concurrent invocations
@@ -75,9 +79,99 @@ if [ -z "$SESSION_ID" ]; then
 fi
 
 SESSION_FILE="$SESSIONS_DIR/${SESSION_ID}.json"
-PROJECT=$(basename "${CWD:-unknown}")
+
+# Derive project label. T3 Code worktrees live at ~/.t3/worktrees/<title>/<sha-dir>;
+# strip to the <title> segment. Everything else falls back to basename(cwd).
+derive_project() {
+    local cwd="${1:-unknown}"
+    case "$cwd" in
+        "$HOME/.t3/worktrees/"*)
+            local rest="${cwd#$HOME/.t3/worktrees/}"
+            printf '%s' "${rest%%/*}"
+            ;;
+        *)
+            basename "$cwd"
+            ;;
+    esac
+}
+PROJECT=$(derive_project "${CWD:-unknown}")
 PROJECT_NAME=$(echo "$PROJECT" | sed 's/[-_]/ /g')
 NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# --- T3 utility session detection ---
+# T3 Code spawns internal sdk-cli processes (for thread title, git branch name, etc.)
+# in the same worktree as the main chat. Each gets its own session_id and would otherwise
+# appear as a separate row. Attribute them to the parent chat via parent_session_id so
+# the Swift aggregator hides them and bumps agent_count.
+is_t3_utility() {
+    [ "${__CFBundleIdentifier:-}" = "com.t3tools.t3code" ] \
+        && [ "${CLAUDE_CODE_ENTRYPOINT:-}" = "sdk-cli" ]
+}
+
+resolve_t3_parent_sid() {
+    T3_PARENT_SID=""
+    [ -d "$SESSIONS_DIR" ] || return 0
+    # Find the most recently-updated t3code session in this cwd that isn't us and
+    # isn't itself a linked child. Guard against no-match globs.
+    shopt -s nullglob 2>/dev/null || true
+    local files=("$SESSIONS_DIR"/*.json)
+    [ "${#files[@]}" -gt 0 ] || return 0
+    T3_PARENT_SID=$(jq -rs --arg cwd "$CWD" --arg self "$SESSION_ID" \
+        '[.[] | select(.terminal == "t3code" and .cwd == $cwd and .session_id != $self and (.parent_session_id // "") == "")]
+         | sort_by(.updated_at) | reverse | .[0].session_id // empty' \
+        "${files[@]}" 2>/dev/null)
+}
+
+if is_t3_utility; then
+    resolve_t3_parent_sid
+    if [ -n "$T3_PARENT_SID" ]; then
+        case "$EVENT" in
+            SessionStart)
+                jq -n \
+                    --arg sid "$SESSION_ID" \
+                    --arg status "working" \
+                    --arg project "$PROJECT" \
+                    --arg cwd "${CWD:-}" \
+                    --arg parent "$T3_PARENT_SID" \
+                    --arg now "$NOW" \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: "t3code", terminal_session_id: "", started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent}' \
+                    > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+                ;;
+            UserPromptSubmit)
+                PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty' | head -c 200)
+                if [ -f "$SESSION_FILE" ]; then
+                    update_json_file "$SESSION_FILE" --arg updated "$NOW" --arg prompt "$PROMPT" \
+                        'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end | if $prompt != "" then .last_prompt = $prompt else . end'
+                fi
+                ;;
+            PreToolUse)
+                TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""')
+                if [ -f "$SESSION_FILE" ]; then
+                    if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
+                        update_json_file "$SESSION_FILE" --arg updated "$NOW" \
+                            '.status = "attention" | .updated_at = $updated'
+                    else
+                        update_json_file "$SESSION_FILE" --arg updated "$NOW" \
+                            'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
+                    fi
+                fi
+                ;;
+            PostToolUse|PostToolUseFailure)
+                if [ -f "$SESSION_FILE" ]; then
+                    update_json_file "$SESSION_FILE" --arg updated "$NOW" \
+                        'if .status != "working" then .status = "working" | .updated_at = $updated else .updated_at = $updated end'
+                fi
+                ;;
+            Stop|SessionEnd)
+                rm -f "$SESSION_FILE" "$SESSIONS_DIR/${SESSION_ID}.context" "$SESSIONS_DIR/${SESSION_ID}.model"
+                ;;
+            *)
+                ;;
+        esac
+        exit 0
+    fi
+    # No parent found (race at startup) — fall through to normal T3 flow.
+fi
 
 # --- Team agent detection ---
 # Team agents run in separate tmux sessions (not child processes of the team lead).

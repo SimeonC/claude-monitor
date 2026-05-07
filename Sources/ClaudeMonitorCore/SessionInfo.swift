@@ -19,7 +19,7 @@ private func parseISO8601(_ string: String) -> Date? {
     isoFormatterWithFractional.date(from: string) ?? isoFormatterBasic.date(from: string)
 }
 
-public struct SessionInfo: Codable, Identifiable {
+public struct SessionInfo: Codable, Identifiable, Equatable {
     public let session_id: String
     public var status: String
     public var project: String
