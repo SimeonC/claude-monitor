@@ -79,6 +79,7 @@ if [ -z "$SESSION_ID" ]; then
 fi
 
 SESSION_FILE="$SESSIONS_DIR/${SESSION_ID}.json"
+MONITORS_FILE="$SESSIONS_DIR/${SESSION_ID}.monitors"
 
 # Derive project label. T3 Code worktrees live at ~/.t3/worktrees/<title>/<sha-dir>;
 # strip to the <title> segment. Everything else falls back to basename(cwd).
@@ -236,6 +237,48 @@ detect_skip_permissions() {
                 return 0
             fi
             return 1
+        fi
+    done
+    return 1
+}
+
+# --- Monitor process-tree helpers ---
+
+# Return the PID of the first `claude` ancestor of this script.
+get_claude_ancestor_pid() {
+    local pid=$$
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -z "$pid" ] || [ "$pid" = "1" ] || [ "$pid" = "0" ] && break
+        [ "$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)" = "claude" ] \
+            && echo "$pid" && return 0
+    done
+    return 1
+}
+
+# Emit all descendant PIDs of $1 (recursive, breadth-first).
+_descendant_pids() {
+    local pid="$1"
+    local children
+    children=$(pgrep -P "$pid" 2>/dev/null) || return
+    for child in $children; do
+        echo "$child"
+        _descendant_pids "$child"
+    done
+}
+
+# Return 0 if the claude ancestor has live bash/sh descendants not running monitor.sh.
+# Used at Stop time as a fallback when the sidecar is absent/empty.
+has_live_monitor_children() {
+    local claude_pid
+    claude_pid=$(get_claude_ancestor_pid) || return 1
+    local pid
+    for pid in $(_descendant_pids "$claude_pid" 2>/dev/null); do
+        local comm
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)
+        if [ "$comm" = "bash" ] || [ "$comm" = "sh" ]; then
+            ps -ww -o args= -p "$pid" 2>/dev/null | grep -q "monitor\.sh" && continue
+            return 0
         fi
     done
     return 1
@@ -688,10 +731,24 @@ case "$EVENT" in
     Stop)
         ensure_session_file
         if [ -f "$SESSION_FILE" ]; then
-            update_json_file "$SESSION_FILE" \
-                --arg status "idle" \
-                --arg updated "$NOW" \
-                'if .status == "dead" then . else .status = $status | .updated_at = $updated end'
+            if [ -f "$MONITORS_FILE" ] && [ -s "$MONITORS_FILE" ]; then
+                # Sidecar is non-empty — a Monitor is still tracked as alive; leave status as working.
+                update_json_file "$SESSION_FILE" \
+                    --arg updated "$NOW" \
+                    'if .status == "dead" then . else .updated_at = $updated end'
+            elif has_live_monitor_children; then
+                # Process-tree fallback: sidecar missed it but bash children are still running.
+                rm -f "$MONITORS_FILE"
+                update_json_file "$SESSION_FILE" \
+                    --arg updated "$NOW" \
+                    'if .status == "dead" then . else .updated_at = $updated end'
+            else
+                rm -f "$MONITORS_FILE"
+                update_json_file "$SESSION_FILE" \
+                    --arg status "idle" \
+                    --arg updated "$NOW" \
+                    'if .status == "dead" then . else .status = $status | .updated_at = $updated end'
+            fi
         fi
         # Skip notification for team agent sessions.
         # detect_parent_session_id is re-checked here as a fallback in case the process
@@ -736,7 +793,7 @@ case "$EVENT" in
                 --arg updated "$NOW" \
                 '.status = $status | .updated_at = $updated'
         fi
-        rm -f "$SESSIONS_DIR/${SESSION_ID}.context" "$SESSIONS_DIR/${SESSION_ID}.model"
+        rm -f "$SESSIONS_DIR/${SESSION_ID}.context" "$SESSIONS_DIR/${SESSION_ID}.model" "$MONITORS_FILE"
         ;;
 
     SubagentStart)
@@ -785,6 +842,24 @@ case "$EVENT" in
                 --arg updated "$NOW" \
                 'if .status == "dead" then . else .status = "working" | .updated_at = $updated end'
         fi
+        # Track Monitor tasks in sidecar so Stop knows not to set idle.
+        TOOL_NAME_PTU=$(echo "$INPUT" | jq -r '.tool_name // ""')
+        if [ "$TOOL_NAME_PTU" = "Monitor" ]; then
+            # tool_response may be an object with task_id, or a text string containing "task <id>"
+            MONITOR_TASK_ID=$(echo "$INPUT" | jq -r '
+                .tool_response |
+                if type == "object" then .task_id // ""
+                elif type == "string" then .
+                else "" end
+            ' 2>/dev/null | grep -oE '\btask [a-z0-9]+\b' | awk '{print $2}')
+            # Also try direct object field if grep found nothing
+            if [ -z "$MONITOR_TASK_ID" ]; then
+                MONITOR_TASK_ID=$(echo "$INPUT" | jq -r '.tool_response.task_id // empty' 2>/dev/null)
+            fi
+            if [ -n "$MONITOR_TASK_ID" ]; then
+                echo "$MONITOR_TASK_ID" >> "$MONITORS_FILE"
+            fi
+        fi
         ;;
 
     PreToolUse)
@@ -792,7 +867,15 @@ case "$EVENT" in
         # the AskUserQuestion tool. PreToolUse fires before the user answers, so flip
         # to attention. PostToolUse (above) clears it back to working.
         TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""')
-        if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
+        if [ "$TOOL_NAME" = "TaskStop" ]; then
+            # Remove the stopped task from the monitors sidecar (if present).
+            STOPPING_TASK_ID=$(echo "$INPUT" | jq -r '.tool_input.task_id // empty' 2>/dev/null)
+            if [ -n "$STOPPING_TASK_ID" ] && [ -f "$MONITORS_FILE" ]; then
+                sed -i '' "/^${STOPPING_TASK_ID}$/d" "$MONITORS_FILE"
+            fi
+            backfill_terminal
+            set_working
+        elif [ "$TOOL_NAME" = "AskUserQuestion" ]; then
             ensure_session_file
             backfill_terminal
             if [ -f "$SESSION_FILE" ]; then
