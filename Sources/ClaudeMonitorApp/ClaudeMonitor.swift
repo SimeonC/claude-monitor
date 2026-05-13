@@ -1495,19 +1495,21 @@ struct PulsingDot: View {
 
 // MARK: - Session Row View
 
-struct SessionRowView: View {
-    let session: SessionInfo
-    var teamInfo: TeamInfo? = nil
-    var isActive: Bool = false
-    var disambiguationSuffix: String? = nil
+struct SessionRowView: View, Equatable {
+    let row: SessionRow
     @State private var isHovered = false
     @State private var badgeScale: CGFloat = 1.0
 
+    static func == (l: SessionRowView, r: SessionRowView) -> Bool {
+        l.row.identityHash == r.row.identityHash
+    }
+
+    private var session: SessionInfo { row.session }
     private var isDanger: Bool { session.skip_permissions == true }
-    private var hasTeam: Bool { teamInfo != nil }
+    private var hasTeam: Bool { row.team != nil }
 
     private var badgeCount: Int {
-        let teamCount = teamInfo?.activeAgentCount ?? 0
+        let teamCount = row.team?.activeAgentCount ?? 0
         // Subagents only run during a turn — if session is idle, agent_count is stale
         let agentCount = session.status == "working" ? session.agent_count : 0
         return max(teamCount, agentCount)
@@ -1516,10 +1518,10 @@ struct SessionRowView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             RoundedRectangle(cornerRadius: 1)
-                .fill(Color(red: 45/255, green: 191/255, blue: 230/255).opacity(isActive ? 0.8 : 0))
+                .fill(Color(red: 45/255, green: 191/255, blue: 230/255).opacity(row.isActive ? 0.8 : 0))
                 .frame(width: 3)
                 .padding(.vertical, 4)
-                .animation(.easeInOut(duration: 0.2), value: isActive)
+                .animation(.easeInOut(duration: 0.2), value: row.isActive)
 
             Spacer().frame(width: 6)
 
@@ -1598,8 +1600,8 @@ struct SessionRowView: View {
                         .truncationMode(.tail)
                         .layoutPriority(1)
 
-                    if let suffix = disambiguationSuffix {
-                        Text(suffix)
+                    if row.displayName != session.project {
+                        Text(row.displayName)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.white.opacity(0.35))
                             .lineLimit(1)
@@ -1712,7 +1714,7 @@ struct CogButton: View {
                 VStack(alignment: .leading, spacing: 6) {
                     actionButton(label: "Refresh Data", icon: "arrow.clockwise") {
                         sessionReader?.scanProjects()
-                        sessionReader?.readSessions()
+                        sessionReader?.readSessions()  // kept for step 2; replaced by vm.refresh() in step 3
                     }
                     actionButton(label: "Reinstall Shortcuts", icon: "keyboard") {
                         shortcutManager.reinstall()
@@ -1941,57 +1943,48 @@ func buildDisambiguationMap(_ sessions: [SessionInfo]) -> [String: String] {
 }
 
 struct MonitorContentView: View {
-    @ObservedObject var reader: SessionReader
-    @ObservedObject var teamReader: TeamReader
+    @ObservedObject var vm: MonitorViewModel
+    @ObservedObject var reader: SessionReader   // kept for ttyMap + action delegation
     @ObservedObject var shortcutManager: ShortcutManager
-    @ObservedObject var activeTracker: ActiveSessionTracker
     @State private var isExpanded = true
-    /// Cached per-session disambiguation suffixes — recomputed only when sessions array changes.
-    @State private var disambiguationMap: [String: String] = [:]
-    /// Cached team-info lookup — rebuilt once per sessions change to avoid per-row calls.
-    @State private var teamInfoMap: [String: TeamInfo] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
             // Header — always visible, drag to move
             HeaderBar(
-                sessions: reader.sessions, sessionReader: reader,
+                sessions: vm.snapshot.rows.map { $0.session }, sessionReader: reader,
                 shortcutManager: shortcutManager)
 
-            if isExpanded && !reader.sessions.isEmpty {
+            if isExpanded && !vm.snapshot.rows.isEmpty {
                 Divider()
                     .background(Color.white.opacity(0.1))
 
                 ScrollView {
                     VStack(spacing: 0) {
-                        ForEach(reader.sessions) { session in
-                            SessionRowView(
-                                session: session,
-                                teamInfo: teamInfoMap[session.session_id],
-                                isActive: session.session_id == activeTracker.activeSessionId,
-                                disambiguationSuffix: disambiguationMap[session.session_id]
-                            )
-                            .overlay(
-                                FirstMouseClickArea(
-                                    action: {
-                                        switchToSession(session, ttyMap: reader.ttyMap)
-                                        activeTracker.activeSessionId = session.session_id
-                                    },
-                                    contextMenuBuilder: { event in
-                                        let menu = NSMenu()
-                                        if providerFor(name: session.terminal) != nil {
-                                            menu.addItem(ClosureMenuItem("Relink to Focused Tab") {
-                                                reader.relinkSession(session)
+                        ForEach(vm.snapshot.rows) { row in
+                            SessionRowView(row: row)
+                                .equatable()
+                                .overlay(
+                                    FirstMouseClickArea(
+                                        action: {
+                                            switchToSession(row.session, ttyMap: reader.ttyMap)
+                                            vm.setActive(sessionId: row.session.session_id)
+                                        },
+                                        contextMenuBuilder: { event in
+                                            let menu = NSMenu()
+                                            if providerFor(name: row.session.terminal) != nil {
+                                                menu.addItem(ClosureMenuItem("Relink to Focused Tab") {
+                                                    vm.relink(row.session)
+                                                })
+                                            }
+                                            menu.addItem(ClosureMenuItem("Delete Session") {
+                                                vm.delete(sessionId: row.session.session_id)
                                             })
+                                            return menu
                                         }
-                                        menu.addItem(ClosureMenuItem("Delete Session") {
-                                            reader.deleteSession(session.session_id)
-                                        })
-                                        return menu
-                                    }
+                                    )
                                 )
-                            )
-                            if session.id != reader.sessions.last?.id {
+                            if row.id != vm.snapshot.rows.last?.id {
                                 Divider()
                                     .background(Color.white.opacity(0.05))
                                     .padding(.horizontal, 12)
@@ -2013,21 +2006,6 @@ struct MonitorContentView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
         )
-        .onReceive(reader.$sessions) { newSessions in
-            disambiguationMap = buildDisambiguationMap(newSessions)
-            var tmap: [String: TeamInfo] = [:]
-            for s in newSessions {
-                if let info = teamReader.teamInfo(for: s) { tmap[s.session_id] = info }
-            }
-            teamInfoMap = tmap
-        }
-        .onReceive(teamReader.$teamsBySession) { _ in
-            var tmap: [String: TeamInfo] = [:]
-            for s in reader.sessions {
-                if let info = teamReader.teamInfo(for: s) { tmap[s.session_id] = info }
-            }
-            teamInfoMap = tmap
-        }
     }
 }
 
@@ -2532,13 +2510,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let reader = SessionReader()
     let teamReader = TeamReader()
     var activeTracker: ActiveSessionTracker!
+    var vm: MonitorViewModel!
+    var engine: WatcherEngine?
+    var activationShim: WorkspaceActivationShim?
     var sizeObserver: AnyCancellable?
     var activeSessionObserver: AnyCancellable?
     var shortcutManager: ShortcutManager!
     var currentSessionId: String?
 
-    func jumpToNextSession() {
-        let sessions = reader.sessions
+    @MainActor func jumpToNextSession() {
+        let sessions = vm.snapshot.rows.map { $0.session }
         guard !sessions.isEmpty else { return }
 
         let attentionSessions = sessions.filter { $0.status == "attention" }
@@ -2577,10 +2558,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         reader.teamReader = teamReader
 
         shortcutManager = ShortcutManager { [weak self] in
-            DispatchQueue.main.async { self?.jumpToNextSession() }
+            Task { @MainActor [weak self] in self?.jumpToNextSession() }
         }
 
         activeTracker = ActiveSessionTracker(sessionReader: reader)
+
+        if ProcessInfo.processInfo.environment["CMG_USE_ENGINE"] == "1" {
+            let eng = WatcherEngine()
+            engine = eng
+            vm = MonitorViewModel(sessionReader: reader, teamReader: teamReader, activeTracker: activeTracker)
+            eng.viewModel = vm
+            eng.start(sessionReader: reader, teamReader: teamReader, activeTracker: activeTracker)
+            activationShim = WorkspaceActivationShim(engine: eng)
+        } else {
+            vm = MonitorViewModel(
+                sessionReader: reader, teamReader: teamReader, activeTracker: activeTracker)
+        }
 
         // Sync currentSessionId when focus detection changes the active session,
         // so keyboard shortcut cycling starts from the currently focused session.
@@ -2593,8 +2586,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let hostingView = ClickHostingView(
             rootView: MonitorContentView(
-                reader: reader, teamReader: teamReader, shortcutManager: shortcutManager,
-                activeTracker: activeTracker)
+                vm: vm, reader: reader, shortcutManager: shortcutManager)
         )
         hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: 40))
         hostingView.wantsLayer = true
