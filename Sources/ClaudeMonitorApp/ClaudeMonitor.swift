@@ -226,7 +226,7 @@ struct DerivedSessionData {
 
 class SessionReader: ObservableObject {
     @Published var sessions: [SessionInfo] = []
-    private var livenessTimer: Timer?
+    private var livenessTimerSource: DispatchSourceTimer?
     private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
     /// JSONL-derived data held in memory (never written to session files)
@@ -305,10 +305,15 @@ class SessionReader: ObservableObject {
         }
 
         // Liveness timer: prune dead sessions every 10s (FSEvents can't detect absence of writes)
-        livenessTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) {
-            [weak self] _ in
-            self?.pruneDeadSessions()
-        }
+        let livenessSource = DispatchSource.makeTimerSource(queue: ioQueue)
+        livenessSource.schedule(deadline: .now() + 10, repeating: 10)
+        livenessSource.setEventHandler { [weak self] in self?.pruneDeadSessions() }
+        livenessSource.resume()
+        livenessTimerSource = livenessSource
+    }
+
+    deinit {
+        livenessTimerSource?.cancel()
     }
 
     private func scheduleRead() {
@@ -1277,7 +1282,7 @@ class ActiveSessionTracker: ObservableObject {
         }
     }
     private weak var sessionReader: SessionReader?
-    private var pollTimer: Timer?
+    private var pollTimerSource: DispatchSourceTimer?
     private var workspaceObserver: Any?
     private var sessionsObserver: AnyCancellable?
     private var lastActiveTTY: String?
@@ -1314,7 +1319,7 @@ class ActiveSessionTracker: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
         }
         sessionsObserver?.cancel()
-        pollTimer?.invalidate()
+        pollTimerSource?.cancel()
     }
 
     private func handleAppActivation(_ notification: Notification) {
@@ -1333,15 +1338,17 @@ class ActiveSessionTracker: ObservableObject {
 
     private func startPolling() {
         detectActiveSession()  // immediate first check
-        guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.detectActiveSession()
-        }
+        guard pollTimerSource == nil else { return }
+        let source = DispatchSource.makeTimerSource(queue: .main)
+        source.schedule(deadline: .now() + 2.0, repeating: 2.0)
+        source.setEventHandler { [weak self] in self?.detectActiveSession() }
+        source.resume()
+        pollTimerSource = source
     }
 
     private func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
+        pollTimerSource?.cancel()
+        pollTimerSource = nil
         if activeSessionId != nil {
             activeSessionId = nil
         }
@@ -2511,8 +2518,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let teamReader = TeamReader()
     var activeTracker: ActiveSessionTracker!
     var vm: MonitorViewModel!
-    var engine: WatcherEngine?
-    var activationShim: WorkspaceActivationShim?
+    var engine: WatcherEngine!
+    var activationShim: WorkspaceActivationShim!
     var sizeObserver: AnyCancellable?
     var activeSessionObserver: AnyCancellable?
     var shortcutManager: ShortcutManager!
@@ -2562,18 +2569,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         activeTracker = ActiveSessionTracker(sessionReader: reader)
+        vm = MonitorViewModel(sessionReader: reader, teamReader: teamReader, activeTracker: activeTracker)
 
-        if ProcessInfo.processInfo.environment["CMG_USE_ENGINE"] == "1" {
-            let eng = WatcherEngine()
-            engine = eng
-            vm = MonitorViewModel(sessionReader: reader, teamReader: teamReader, activeTracker: activeTracker)
-            eng.viewModel = vm
-            eng.start(sessionReader: reader, teamReader: teamReader, activeTracker: activeTracker)
-            activationShim = WorkspaceActivationShim(engine: eng)
-        } else {
-            vm = MonitorViewModel(
-                sessionReader: reader, teamReader: teamReader, activeTracker: activeTracker)
-        }
+        engine = WatcherEngine()
+        engine.viewModel = vm
+        engine.start(sessionReader: reader, teamReader: teamReader, activeTracker: activeTracker)
+        activationShim = WorkspaceActivationShim(engine: engine)
 
         // Sync currentSessionId when focus detection changes the active session,
         // so keyboard shortcut cycling starts from the currently focused session.
