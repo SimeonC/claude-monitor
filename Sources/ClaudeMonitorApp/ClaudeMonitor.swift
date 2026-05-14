@@ -2111,17 +2111,11 @@ class FloatingPanel: NSPanel {
     }
 
     func restorePosition() {
-        if let x = UserDefaults.standard.object(forKey: "monitorX") as? Double,
-            let y = UserDefaults.standard.object(forKey: "monitorY") as? Double
-        {
-            self.setFrameOrigin(NSPoint(x: x, y: y))
-        } else if let screen = NSScreen.main {
-            let screenFrame = screen.visibleFrame
-            // Top-right, below menu bar
-            let x = screenFrame.maxX - 296
-            let y = screenFrame.maxY - 60
-            self.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        let vf = screen.visibleFrame
+        let x = vf.maxX - self.frame.width - 24
+        let y = vf.midY - self.frame.height / 2
+        self.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     func savePosition() {
