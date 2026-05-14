@@ -2113,7 +2113,7 @@ class FloatingPanel: NSPanel {
     func restorePosition() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let vf = screen.visibleFrame
-        let x = vf.maxX - self.frame.width - 24
+        let x = vf.maxX - self.frame.width - 60
         let y = vf.midY - self.frame.height / 2
         self.setFrameOrigin(NSPoint(x: x, y: y))
     }
