@@ -61,6 +61,11 @@ update_json_file() {
     rm -rf "$lockdir"
 }
 
+# Opt-out: process sets NO_CLAUDE_MONITOR=true to suppress all monitor recording.
+if [ "${NO_CLAUDE_MONITOR:-}" = "true" ]; then
+    exit 0
+fi
+
 # --- Extract context from hook JSON ---
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
