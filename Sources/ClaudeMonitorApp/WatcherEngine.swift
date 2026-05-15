@@ -21,6 +21,7 @@ final class WatcherEngine {
 
     private var generation: UInt64 = 0
     private var lastSnapshot: MonitorSnapshot = .empty
+    private var lastAttentionPulse: UInt64 = 0
     private var cancellables: Set<AnyCancellable> = []
     private var started = false
 
@@ -34,21 +35,30 @@ final class WatcherEngine {
         guard !started else { return }
         started = true
 
-        // Subscribe to all three published streams. Each update hops to engine.queue so
+        // Subscribe to all four published streams. Each update hops to engine.queue so
         // buildSnapshot (potentially expensive) never runs on the main thread.
-        Publishers.CombineLatest3(
+        //
+        // `attentionPulse` is a realtime force-emit signal: it increments whenever a
+        // session transitions into "attention", so even if identityHash diff would
+        // otherwise coalesce the change we still push it through to the UI.
+        let combined = Publishers.CombineLatest4(
             sessionReader.$sessions,
             teamReader.$teamsBySession,
-            activeTracker.$activeSessionId
+            activeTracker.$activeSessionId,
+            sessionReader.$attentionPulse
         )
-        .sink { [weak self] sessions, teams, activeId in
-            guard let self = self else { return }
-            // sessions/teams/activeId are value types — safe to capture and pass across queues
-            self.queue.async {
-                self.rebuildAndEmit(sessions: sessions, teams: teams, activeId: activeId)
+        combined
+            .sink { [weak self] sessions, teams, activeId, pulse in
+                guard let self = self else { return }
+                // sessions/teams/activeId/pulse are value types — safe to capture
+                self.queue.async {
+                    self.rebuildAndEmit(
+                        sessions: sessions, teams: teams,
+                        activeId: activeId, attentionPulse: pulse
+                    )
+                }
             }
-        }
-        .store(in: &cancellables)
+            .store(in: &cancellables)
     }
 
     func stop() {
@@ -75,8 +85,15 @@ final class WatcherEngine {
 
     /// Called on engine.queue. Builds a snapshot, diffs against the last emission using
     /// per-row identityHash, and emits to the view model only if something visible changed.
+    ///
+    /// Attention-transition force-emit: if `attentionPulse` changed since last emit, OR
+    /// any new row has `statusBucket == .attention` whose ID was not `.attention` in
+    /// `lastSnapshot`, bypass the identityHash guard. Defensive: identityHash already
+    /// includes status, but the explicit check guarantees no attention transition is
+    /// dropped even if hashing logic changes later.
     private func rebuildAndEmit(
-        sessions: [SessionInfo], teams: [String: TeamInfo], activeId: String?
+        sessions: [SessionInfo], teams: [String: TeamInfo],
+        activeId: String?, attentionPulse: UInt64
     ) {
         generation &+= 1
         let snap = buildSnapshot(
@@ -84,12 +101,26 @@ final class WatcherEngine {
             activeId: activeId, generation: generation
         )
 
-        // O(n) diff: skip emit if every row's identityHash is unchanged
+        let pulseChanged = attentionPulse != lastAttentionPulse
+        lastAttentionPulse = attentionPulse
+
         let rows = snap.rows
         let old = lastSnapshot.rows
-        guard rows.count != old.count
+
+        let hashChanged = rows.count != old.count
             || zip(rows, old).contains(where: { $0.identityHash != $1.identityHash })
-        else { return }
+
+        let attentionTransition: Bool = {
+            guard !rows.isEmpty else { return false }
+            var oldAttention: Set<String> = []
+            for r in old where r.statusBucket == .attention { oldAttention.insert(r.id) }
+            for r in rows where r.statusBucket == .attention && !oldAttention.contains(r.id) {
+                return true
+            }
+            return false
+        }()
+
+        guard hashChanged || pulseChanged || attentionTransition else { return }
 
         lastSnapshot = snap
         Task { @MainActor [weak self] in

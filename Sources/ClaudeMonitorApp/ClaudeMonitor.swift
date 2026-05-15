@@ -226,6 +226,10 @@ struct DerivedSessionData {
 
 class SessionReader: ObservableObject {
     @Published var sessions: [SessionInfo] = []
+    /// Increments whenever any session transitions into "attention" status. Used as a
+    /// realtime signal so WatcherEngine can force-emit a snapshot even if the identityHash
+    /// diff would otherwise coalesce the change.
+    @Published private(set) var attentionPulse: UInt64 = 0
     private var livenessTimerSource: DispatchSourceTimer?
     private var dirSource: DirectoryWatcher?
     private var projectsWatcher: DirectoryWatcher?
@@ -294,9 +298,16 @@ class SessionReader: ObservableObject {
         scanProjects()
         readSessions()
 
-        // FSEvents: reload when session files change (debounced via readDebouncer)
-        dirSource = DirectoryWatcher(paths: [sessionsDir], latency: 1.0) { [weak self] in
-            self?.scheduleRead()
+        // FSEvents: reload when session files change. Sessions dir is a hot signal path for
+        // "attention" alerts (Claude hooks write small .json status files). Use low latency
+        // and bypass the read debouncer entirely so orange transitions surface in <200ms.
+        // Reads are mtime-cached; bursts are rare here, so coalescing is unnecessary.
+        dirSource = DirectoryWatcher(paths: [sessionsDir], latency: 0.05) { [weak self] in
+            guard let self = self else { return }
+            let leads = self.teamReader?.leadSessionByTeamName ?? [:]
+            self.ioQueue.async {
+                self._readSessionsOnIOQueue(teamLeadsByName: leads)
+            }
         }
 
         // FSEvents on projects dir: detect new/changed JSONL files (debounced)
@@ -915,6 +926,8 @@ class SessionReader: ObservableObject {
         var loaded: [SessionInfo] = []
         var loadedIds: Set<String> = []
         var currentFileIds: Set<String> = []
+        /// Session IDs that just transitioned cached.status != attention → new.status == attention.
+        var newAttentionIds: Set<String> = []
 
         for file in files where file.hasSuffix(".json") {
             let path = "\(sessionsDir)/\(file)"
@@ -1017,6 +1030,12 @@ class SessionReader: ObservableObject {
                    let modelStr = String(data: modelData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !modelStr.isEmpty {
                     session.model = modelStr
+                }
+                // Detect a fresh idle/working/etc → attention transition for realtime push.
+                if session.status == "attention",
+                   sessionFileCache[sessionId]?.info.status != "attention"
+                {
+                    newAttentionIds.insert(session.session_id)
                 }
                 // Update session file cache (before derivedData enrichment — agent_count re-applied each cycle)
                 sessionFileCache[sessionId] = SessionFileSnapshot(
@@ -1225,8 +1244,12 @@ class SessionReader: ObservableObject {
             dumpDebugState(aggregated: aggregated)
         }
 
+        let hasNewAttention = !newAttentionIds.isEmpty
         DispatchQueue.main.async {
             if self.sessions != aggregated { self.sessions = aggregated }
+            // Pulse AFTER sessions so subscribers reading the combined stream see the
+            // attention status alongside the pulse trigger.
+            if hasNewAttention { self.attentionPulse &+= 1 }
         }
     }
 
