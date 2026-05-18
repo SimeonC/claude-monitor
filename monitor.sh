@@ -880,7 +880,7 @@ case "$EVENT" in
             fi
             backfill_terminal
             set_working
-        elif [ "$TOOL_NAME" = "AskUserQuestion" ]; then
+        elif [ "$TOOL_NAME" = "AskUserQuestion" ] || [ "$TOOL_NAME" = "ExitPlanMode" ]; then
             ensure_session_file
             backfill_terminal
             if [ -f "$SESSION_FILE" ]; then
