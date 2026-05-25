@@ -160,12 +160,12 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
 
     public var isStale: Bool { isStale(at: Date()) }
 
-    public var modeIcon: String? {
+    public var modeIcon: String {
         switch permission_mode {
-        case "plan": return "list.bullet.clipboard"
-        case "acceptEdits": return "checkmark.circle"
-        case "bypassPermissions": return "lock.open.fill"
-        default: return nil
+        case "plan": return "pause.fill"
+        case "acceptEdits": return "play.fill"
+        case "bypassPermissions": return "forward.fill"
+        default: return "circle.fill"
         }
     }
 

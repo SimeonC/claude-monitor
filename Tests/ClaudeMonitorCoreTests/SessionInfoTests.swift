@@ -193,19 +193,19 @@ final class SessionInfoTests: XCTestCase {
     func testModeIconForKnownModes() {
         var s = makeSession()
         s.permission_mode = "plan"
-        XCTAssertEqual(s.modeIcon, "list.bullet.clipboard")
+        XCTAssertEqual(s.modeIcon, "pause.fill")
         s.permission_mode = "acceptEdits"
-        XCTAssertEqual(s.modeIcon, "checkmark.circle")
+        XCTAssertEqual(s.modeIcon, "play.fill")
         s.permission_mode = "bypassPermissions"
-        XCTAssertEqual(s.modeIcon, "lock.open.fill")
+        XCTAssertEqual(s.modeIcon, "forward.fill")
     }
 
-    func testModeIconNilForDefaultAndNil() {
+    func testModeIconCircleForDefaultAndNil() {
         var s = makeSession()
         s.permission_mode = "default"
-        XCTAssertNil(s.modeIcon)
+        XCTAssertEqual(s.modeIcon, "circle.fill")
         s.permission_mode = nil
-        XCTAssertNil(s.modeIcon)
+        XCTAssertEqual(s.modeIcon, "circle.fill")
     }
 
     // MARK: - modeLabel
