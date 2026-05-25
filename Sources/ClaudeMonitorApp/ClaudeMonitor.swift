@@ -196,6 +196,7 @@ final class Debouncer {
 struct SessionMeta {
     var isSubagent: Bool
     var teamName: String?
+    var permissionMode: String?
     /// JSONL mtime when this meta was last read; nil means never read or mtime unknown.
     /// Used to detect when the JSONL has grown past the initial permission-mode entry
     /// so we can re-read and pick up teamName/agentName written shortly after session start.
@@ -402,8 +403,9 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Read the head of a JSONL file (first 8KB) to extract static metadata: agentName and teamName.
-    /// These fields only appear in the first few records and never change during a session.
+    /// Read the head of a JSONL file (first 8KB) to extract static metadata: agentName, teamName,
+    /// and permissionMode. permissionMode captures the **last** occurrence in the window so a
+    /// mid-session change (within the head) wins over the initial entry.
     private func readJSONLHead(path: String) -> SessionMeta {
         guard let fileHandle = FileHandle(forReadingAtPath: path) else {
             return SessionMeta(isSubagent: false, teamName: nil)
@@ -418,6 +420,7 @@ class SessionReader: ObservableObject {
 
         var isSubagent = false
         var teamName: String? = nil
+        var permissionMode: String? = nil
 
         let lines = text.components(separatedBy: "\n")
         for line in lines {
@@ -432,11 +435,15 @@ class SessionReader: ObservableObject {
             if let tn = json["teamName"] as? String, !tn.isEmpty {
                 teamName = tn
             }
-            // Once we have what we need, stop
+            if json["type"] as? String == "permission-mode",
+               let mode = json["permissionMode"] as? String {
+                permissionMode = mode  // keep updating so last occurrence wins
+            }
+            // Once we have subagent+team, stop (permissionMode is captured above for each line)
             if isSubagent && teamName != nil { break }
         }
 
-        return SessionMeta(isSubagent: isSubagent, teamName: teamName)
+        return SessionMeta(isSubagent: isSubagent, teamName: teamName, permissionMode: permissionMode)
     }
 
     /// Find the JSONL file path for a session ID by scanning project directories.
@@ -487,12 +494,19 @@ class SessionReader: ObservableObject {
                     let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
                     // Read static metadata from head.
-                    // Re-read if: (a) not cached, or (b) cached without definitive info (no
-                    // agentName/teamName found) AND the JSONL mtime has changed — handles the
-                    // race where readJSONLHead ran before the first user message was written.
+                    // Re-read if: (a) not cached, (b) mtime changed, or (c) cached with definitive
+                    // subagent/team info but permissionMode still unknown (file may have grown to
+                    // include the permission-mode entry since last read).
                     let meta: SessionMeta
+                    let hasDefinitiveInfo: Bool
+                    if let cached = self.sessionMetaCache[sessionId] {
+                        hasDefinitiveInfo = (cached.isSubagent || cached.teamName != nil)
+                            && cached.permissionMode != nil
+                    } else {
+                        hasDefinitiveInfo = false
+                    }
                     if let cached = self.sessionMetaCache[sessionId],
-                       cached.isSubagent || cached.teamName != nil || cached.jsonlMtime == mtime {
+                       hasDefinitiveInfo || cached.jsonlMtime == mtime {
                         meta = cached
                     } else {
                         var m = self.readJSONLHead(path: jsonlPath)
@@ -1150,11 +1164,17 @@ class SessionReader: ObservableObject {
             }
         }
         for i in loaded.indices {
-            if let teamName = self.sessionMetaCache[loaded[i].session_id]?.teamName,
+            let cachedMeta = self.sessionMetaCache[loaded[i].session_id]
+            if let teamName = cachedMeta?.teamName,
                let leadSid = teamLeadsByName[teamName],
                loadedIds.contains(leadSid) {
                 loaded[i].parent_session_id = leadSid
                 debugLog("Linked agent \(loaded[i].session_id) (team: \(teamName)) → lead \(leadSid)")
+            }
+            // Inject permission_mode from JSONL meta (JSONL is the source of truth; overwrites
+            // whatever may be in the session JSON file)
+            if let mode = cachedMeta?.permissionMode {
+                loaded[i].permission_mode = mode
             }
         }
 
@@ -1275,6 +1295,7 @@ class SessionReader: ObservableObject {
             if let pct = s.context_pct { d["context_pct"] = pct }
             if let m = s.model { d["model"] = m }
             if s.skip_permissions == true { d["skip_permissions"] = true }
+            if let mode = s.permission_mode { d["permission_mode"] = mode }
             if let gid = s.ghostty_terminal_id { d["ghostty_terminal_id"] = gid }
             if s.agent_count > 0 { d["agent_count"] = s.agent_count }
             if let parent = s.parent_session_id { d["parent_session_id"] = parent }
@@ -1598,22 +1619,26 @@ struct SessionRowView: View, Equatable {
                         }
                         .fixedSize()
                         .offset(y: 1)
-                    } else if session.skip_permissions == true {
-                        Image(systemName: "lock.open.fill")
+                    } else if isDanger || session.modeIcon != nil {
+                        let iconName = session.modeIcon ?? "lock.open.fill"
+                        Image(systemName: iconName)
                             .font(.system(size: 9))
                             .foregroundColor(session.statusColor)
                             .shadow(color: session.statusColor.opacity(0.6), radius: session.status == "working" ? 4 : 0)
                             .frame(width: 8, height: 8)
                             .background(
                                 RoundedRectangle(cornerRadius: 3)
-                                    .fill(Color.red.opacity(0.3))
+                                    .fill(isDanger ? Color.red.opacity(0.3) : session.statusColor.opacity(0.15))
                                     .frame(width: 16, height: 16)
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: 3)
-                                    .stroke(Color.red.opacity(0.5), lineWidth: 1)
-                                    .frame(width: 16, height: 16)
+                                isDanger
+                                    ? RoundedRectangle(cornerRadius: 3)
+                                        .stroke(Color.red.opacity(0.5), lineWidth: 1)
+                                        .frame(width: 16, height: 16)
+                                    : nil
                             )
+                            .help(session.modeLabel ?? (isDanger ? "Bypass permissions (--dangerously-skip-permissions)" : ""))
                             .offset(y: 1)
                     } else {
                         PulsingDot(

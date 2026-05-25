@@ -165,4 +165,66 @@ final class SessionInfoTests: XCTestCase {
         let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
         XCTAssertNil(session.skip_permissions)
     }
+
+    // MARK: - permission_mode decoding
+
+    func testDecodeWithPermissionModePlan() throws {
+        let json = """
+        {"session_id":"s3","status":"idle","project":"p","cwd":"/p",
+         "terminal":"","terminal_session_id":"","started_at":"","updated_at":"",
+         "last_prompt":"","agent_count":0,"permission_mode":"plan"}
+        """
+        let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(session.permission_mode, "plan")
+    }
+
+    func testDecodeWithoutPermissionModeIsNil() throws {
+        let json = """
+        {"session_id":"s4","status":"idle","project":"p","cwd":"/p",
+         "terminal":"","terminal_session_id":"","started_at":"","updated_at":"",
+         "last_prompt":"","agent_count":0}
+        """
+        let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
+        XCTAssertNil(session.permission_mode)
+    }
+
+    // MARK: - modeIcon
+
+    func testModeIconForKnownModes() {
+        var s = makeSession()
+        s.permission_mode = "plan"
+        XCTAssertEqual(s.modeIcon, "list.bullet.clipboard")
+        s.permission_mode = "acceptEdits"
+        XCTAssertEqual(s.modeIcon, "checkmark.circle")
+        s.permission_mode = "bypassPermissions"
+        XCTAssertEqual(s.modeIcon, "lock.open.fill")
+    }
+
+    func testModeIconNilForDefaultAndNil() {
+        var s = makeSession()
+        s.permission_mode = "default"
+        XCTAssertNil(s.modeIcon)
+        s.permission_mode = nil
+        XCTAssertNil(s.modeIcon)
+    }
+
+    // MARK: - modeLabel
+
+    func testModeLabelForKnownModes() {
+        var s = makeSession()
+        s.permission_mode = "plan"
+        XCTAssertEqual(s.modeLabel, "Plan mode")
+        s.permission_mode = "acceptEdits"
+        XCTAssertEqual(s.modeLabel, "Accept edits")
+        s.permission_mode = "bypassPermissions"
+        XCTAssertEqual(s.modeLabel, "Bypass permissions")
+    }
+
+    func testModeLabelNilForDefaultAndNil() {
+        var s = makeSession()
+        s.permission_mode = "default"
+        XCTAssertNil(s.modeLabel)
+        s.permission_mode = nil
+        XCTAssertNil(s.modeLabel)
+    }
 }

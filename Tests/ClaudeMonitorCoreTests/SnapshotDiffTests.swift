@@ -80,6 +80,21 @@ final class SnapshotDiffTests: XCTestCase {
         XCTAssertNotEqual(noTeam, withTeam)
     }
 
+    func test_permissionModeChange_differentHash() {
+        var noMode = session()
+        var planMode = session()
+        planMode.permission_mode = "plan"
+        XCTAssertNotEqual(hash(for: noMode), hash(for: planMode))
+    }
+
+    func test_differentPermissionModes_differentHashes() {
+        var plan = session()
+        plan.permission_mode = "plan"
+        var accept = session()
+        accept.permission_mode = "acceptEdits"
+        XCTAssertNotEqual(hash(for: plan), hash(for: accept))
+    }
+
     // MARK: - Non-rendered fields do NOT flip the hash
 
     func test_terminalSessionIdChange_sameHash() {

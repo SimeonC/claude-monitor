@@ -129,6 +129,13 @@ public func aggregateSessions(
             merged.skip_permissions = true
         }
 
+        // Merge permission_mode: most-recently-updated session's non-nil mode wins.
+        // Falls back to the first non-nil mode in the group if the most-recent has none.
+        merged.permission_mode = group
+            .sorted { $0.updated_at > $1.updated_at }
+            .compactMap { $0.permission_mode }
+            .first
+
         // Track all session_ids from the group for team lead matching post-aggregation
         merged.merged_session_ids = group.map { $0.session_id }
 

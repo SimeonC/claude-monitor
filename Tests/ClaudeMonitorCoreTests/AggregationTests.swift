@@ -335,6 +335,48 @@ final class AggregationTests: XCTestCase {
             "Empty terminal_session_id sessions should fall back to project|cwd grouping")
     }
 
+    // MARK: - permission_mode merging
+
+    func testPermissionModeTakenFromMostRecentlyUpdated() {
+        // Two sessions with different modes; the more recently updated one should win
+        var older = makeSession(
+            id: "a", status: "idle", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-120)
+        )
+        older.permission_mode = "plan"
+        var newer = makeSession(
+            id: "b", status: "idle", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        newer.permission_mode = "acceptEdits"
+        let result = aggregateSessions([older, newer], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].permission_mode, "acceptEdits",
+            "Most recently updated session's permission_mode should win")
+    }
+
+    func testPermissionModeFromOnlySessionThatHasIt() {
+        var withMode = makeSession(
+            id: "a", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10)
+        )
+        withMode.permission_mode = "plan"
+        let withoutMode = makeSession(id: "b", status: "idle", project: "proj", cwd: "/proj")
+        let result = aggregateSessions([withMode, withoutMode], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result[0].permission_mode, "plan",
+            "permission_mode should be inherited when only one session has it")
+    }
+
+    func testPermissionModeNilWhenNoSessionHasIt() {
+        let a = makeSession(id: "a", status: "working", project: "proj", cwd: "/proj",
+            updatedAt: referenceDate.addingTimeInterval(-10))
+        let b = makeSession(id: "b", status: "idle", project: "proj", cwd: "/proj")
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertNil(result[0].permission_mode)
+    }
+
     func testMixedTerminalSessionIdAndEmptyNotMerged() {
         let a = makeSession(id: "a", status: "idle", project: "proj", cwd: "/proj",
             terminalSessionId: "/dev/ttys007")

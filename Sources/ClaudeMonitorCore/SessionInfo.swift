@@ -34,6 +34,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
     public var context_pct: Int?
     public var model: String?
     public var skip_permissions: Bool?
+    public var permission_mode: String?
     /// Ghostty terminal UUID stored directly at session start (avoids tty_map indirection).
     public var ghostty_terminal_id: String?
     /// CMUX surface UUID from the socket API (fresh, not from env var).
@@ -49,8 +50,8 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
     public enum CodingKeys: String, CodingKey {
         case session_id, status, project, cwd, terminal, terminal_session_id,
             started_at, updated_at, last_prompt, agent_count, parent_session_id, context_pct,
-            model, skip_permissions, ghostty_terminal_id, cmux_surface_id, cmux_workspace_id,
-            merged_session_ids
+            model, skip_permissions, permission_mode, ghostty_terminal_id, cmux_surface_id,
+            cmux_workspace_id, merged_session_ids
     }
 
     public init(
@@ -59,8 +60,9 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         started_at: String, updated_at: String, last_prompt: String,
         agent_count: Int = 0, parent_session_id: String? = nil,
         context_pct: Int? = nil, model: String? = nil, skip_permissions: Bool? = nil,
-        ghostty_terminal_id: String? = nil, cmux_surface_id: String? = nil,
-        cmux_workspace_id: String? = nil, merged_session_ids: [String]? = nil
+        permission_mode: String? = nil, ghostty_terminal_id: String? = nil,
+        cmux_surface_id: String? = nil, cmux_workspace_id: String? = nil,
+        merged_session_ids: [String]? = nil
     ) {
         self.session_id = session_id
         self.status = status
@@ -76,6 +78,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         self.context_pct = context_pct
         self.model = model
         self.skip_permissions = skip_permissions
+        self.permission_mode = permission_mode
         self.ghostty_terminal_id = ghostty_terminal_id
         self.cmux_surface_id = cmux_surface_id
         self.cmux_workspace_id = cmux_workspace_id
@@ -98,6 +101,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         context_pct = try? c.decode(Int.self, forKey: .context_pct)
         model = try? c.decode(String.self, forKey: .model)
         skip_permissions = try? c.decode(Bool.self, forKey: .skip_permissions)
+        permission_mode = try? c.decode(String.self, forKey: .permission_mode)
         ghostty_terminal_id = try? c.decode(String.self, forKey: .ghostty_terminal_id)
         cmux_surface_id = try? c.decode(String.self, forKey: .cmux_surface_id)
         cmux_workspace_id = try? c.decode(String.self, forKey: .cmux_workspace_id)
@@ -155,4 +159,22 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
     }
 
     public var isStale: Bool { isStale(at: Date()) }
+
+    public var modeIcon: String? {
+        switch permission_mode {
+        case "plan": return "list.bullet.clipboard"
+        case "acceptEdits": return "checkmark.circle"
+        case "bypassPermissions": return "lock.open.fill"
+        default: return nil
+        }
+    }
+
+    public var modeLabel: String? {
+        switch permission_mode {
+        case "plan": return "Plan mode"
+        case "acceptEdits": return "Accept edits"
+        case "bypassPermissions": return "Bypass permissions"
+        default: return nil
+        }
+    }
 }
