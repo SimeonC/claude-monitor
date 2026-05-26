@@ -162,17 +162,23 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
 
     public var modeIcon: String {
         switch permission_mode {
+        case "default": return "shield.fill"
         case "plan": return "pause.fill"
         case "acceptEdits": return "play.fill"
+        case "auto": return "bolt.fill"
+        case "dontAsk": return "bell.slash.fill"
         case "bypassPermissions": return "forward.fill"
-        default: return "circle.fill"
+        default: return "questionmark.circle"
         }
     }
 
     public var modeLabel: String? {
         switch permission_mode {
+        case "default": return "Default"
         case "plan": return "Plan mode"
         case "acceptEdits": return "Accept edits"
+        case "auto": return "Auto"
+        case "dontAsk": return "Don't ask"
         case "bypassPermissions": return "Bypass permissions"
         default: return nil
         }

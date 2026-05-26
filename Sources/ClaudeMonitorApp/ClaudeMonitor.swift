@@ -196,10 +196,7 @@ final class Debouncer {
 struct SessionMeta {
     var isSubagent: Bool
     var teamName: String?
-    var permissionMode: String?
     /// JSONL mtime when this meta was last read; nil means never read or mtime unknown.
-    /// Used to detect when the JSONL has grown past the initial permission-mode entry
-    /// so we can re-read and pick up teamName/agentName written shortly after session start.
     var jsonlMtime: Date?
 }
 
@@ -403,9 +400,7 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Read the head of a JSONL file (first 8KB) to extract static metadata: agentName, teamName,
-    /// and permissionMode. permissionMode captures the **last** occurrence in the window so a
-    /// mid-session change (within the head) wins over the initial entry.
+    /// Read the head of a JSONL file (first 8KB) to extract static metadata: agentName, teamName.
     private func readJSONLHead(path: String) -> SessionMeta {
         guard let fileHandle = FileHandle(forReadingAtPath: path) else {
             return SessionMeta(isSubagent: false, teamName: nil)
@@ -420,7 +415,6 @@ class SessionReader: ObservableObject {
 
         var isSubagent = false
         var teamName: String? = nil
-        var permissionMode: String? = nil
 
         let lines = text.components(separatedBy: "\n")
         for line in lines {
@@ -435,15 +429,10 @@ class SessionReader: ObservableObject {
             if let tn = json["teamName"] as? String, !tn.isEmpty {
                 teamName = tn
             }
-            if json["type"] as? String == "permission-mode",
-               let mode = json["permissionMode"] as? String {
-                permissionMode = mode  // keep updating so last occurrence wins
-            }
-            // Once we have subagent+team, stop (permissionMode is captured above for each line)
             if isSubagent && teamName != nil { break }
         }
 
-        return SessionMeta(isSubagent: isSubagent, teamName: teamName, permissionMode: permissionMode)
+        return SessionMeta(isSubagent: isSubagent, teamName: teamName)
     }
 
     /// Find the JSONL file path for a session ID by scanning project directories.
@@ -493,20 +482,9 @@ class SessionReader: ObservableObject {
 
                     let sessionId = String(file.dropLast(6))  // remove ".jsonl"
 
-                    // Read static metadata from head.
-                    // Re-read if: (a) not cached, (b) mtime changed, or (c) cached with definitive
-                    // subagent/team info but permissionMode still unknown (file may have grown to
-                    // include the permission-mode entry since last read).
+                    // Read static metadata from head; re-read on mtime change only.
                     let meta: SessionMeta
-                    let hasDefinitiveInfo: Bool
-                    if let cached = self.sessionMetaCache[sessionId] {
-                        hasDefinitiveInfo = (cached.isSubagent || cached.teamName != nil)
-                            && cached.permissionMode != nil
-                    } else {
-                        hasDefinitiveInfo = false
-                    }
-                    if let cached = self.sessionMetaCache[sessionId],
-                       hasDefinitiveInfo || cached.jsonlMtime == mtime {
+                    if let cached = self.sessionMetaCache[sessionId], cached.jsonlMtime == mtime {
                         meta = cached
                     } else {
                         var m = self.readJSONLHead(path: jsonlPath)
@@ -1149,8 +1127,6 @@ class SessionReader: ObservableObject {
         if !teamLeadsByName.isEmpty {
             for session in loaded {
                 let cached = self.sessionMetaCache[session.session_id]
-                // Re-read only if: (a) not cached, or (b) cached without definitive info AND
-                // JSONL mtime has changed since last read (file grew past the initial permission entry)
                 let needsRead = cached == nil || (!cached!.isSubagent && cached!.teamName == nil)
                 if needsRead,
                    let jsonlPath = self.findJSONLPath(sessionId: session.session_id) {
@@ -1170,11 +1146,6 @@ class SessionReader: ObservableObject {
                loadedIds.contains(leadSid) {
                 loaded[i].parent_session_id = leadSid
                 debugLog("Linked agent \(loaded[i].session_id) (team: \(teamName)) → lead \(leadSid)")
-            }
-            // Inject permission_mode from JSONL meta (JSONL is the source of truth; overwrites
-            // whatever may be in the session JSON file)
-            if let mode = cachedMeta?.permissionMode {
-                loaded[i].permission_mode = mode
             }
         }
 

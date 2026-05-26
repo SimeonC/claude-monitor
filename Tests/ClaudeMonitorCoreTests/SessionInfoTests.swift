@@ -200,12 +200,39 @@ final class SessionInfoTests: XCTestCase {
         XCTAssertEqual(s.modeIcon, "forward.fill")
     }
 
-    func testModeIconCircleForDefaultAndNil() {
+    func testModeIconForDefaultMode() {
         var s = makeSession()
         s.permission_mode = "default"
-        XCTAssertEqual(s.modeIcon, "circle.fill")
+        XCTAssertEqual(s.modeIcon, "shield.fill")
+    }
+
+    func testModeIconForAutoMode() {
+        var s = makeSession()
+        s.permission_mode = "auto"
+        XCTAssertEqual(s.modeIcon, "bolt.fill")
+    }
+
+    func testModeIconForDontAskMode() {
+        var s = makeSession()
+        s.permission_mode = "dontAsk"
+        XCTAssertEqual(s.modeIcon, "bell.slash.fill")
+    }
+
+    func testModeIconForNilMode() {
+        var s = makeSession()
         s.permission_mode = nil
-        XCTAssertEqual(s.modeIcon, "circle.fill")
+        XCTAssertEqual(s.modeIcon, "questionmark.circle")
+    }
+
+    func testModeIconDoesNotCollideWithStatusIcons() {
+        let statusIcons = Set(["circle.dotted", "circle.fill", "checkmark.circle.fill",
+                               "exclamationmark.triangle.fill", "arrow.down.circle", "circle"])
+        for mode in ["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"] {
+            var s = makeSession()
+            s.permission_mode = mode
+            XCTAssertFalse(statusIcons.contains(s.modeIcon),
+                           "modeIcon '\(s.modeIcon)' for mode '\(mode)' collides with a status icon")
+        }
     }
 
     // MARK: - modeLabel
@@ -220,10 +247,26 @@ final class SessionInfoTests: XCTestCase {
         XCTAssertEqual(s.modeLabel, "Bypass permissions")
     }
 
-    func testModeLabelNilForDefaultAndNil() {
+    func testModeLabelForDefaultMode() {
         var s = makeSession()
         s.permission_mode = "default"
-        XCTAssertNil(s.modeLabel)
+        XCTAssertEqual(s.modeLabel, "Default")
+    }
+
+    func testModeLabelForAutoMode() {
+        var s = makeSession()
+        s.permission_mode = "auto"
+        XCTAssertEqual(s.modeLabel, "Auto")
+    }
+
+    func testModeLabelForDontAskMode() {
+        var s = makeSession()
+        s.permission_mode = "dontAsk"
+        XCTAssertEqual(s.modeLabel, "Don't ask")
+    }
+
+    func testModeLabelNilForNilMode() {
+        var s = makeSession()
         s.permission_mode = nil
         XCTAssertNil(s.modeLabel)
     }

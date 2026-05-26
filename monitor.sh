@@ -69,6 +69,7 @@ fi
 # --- Extract context from hook JSON ---
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+PERMISSION_MODE=$(echo "$INPUT" | jq -r '.permission_mode // empty')
 
 # Skip T3 Code probe sessions launched at $HOME with the SDK entrypoint — these are
 # ephemeral (<1s) processes T3 spawns for auth/state checks, not user-facing sessions.
@@ -903,5 +904,13 @@ case "$EVENT" in
         set_working
         ;;
 esac
+
+# Persist permission_mode to session file whenever the hook supplies it.
+if [ -n "$PERMISSION_MODE" ] && [ -f "$SESSION_FILE" ]; then
+    CURRENT_PM=$(jq -r '.permission_mode // ""' "$SESSION_FILE" 2>/dev/null)
+    if [ "$CURRENT_PM" != "$PERMISSION_MODE" ]; then
+        update_json_file "$SESSION_FILE" --arg pm "$PERMISSION_MODE" '.permission_mode = $pm'
+    fi
+fi
 
 exit 0
