@@ -1591,7 +1591,7 @@ struct SessionRowView: View, Equatable {
                         .fixedSize()
                         .offset(y: 1)
                     } else {
-                        Image(systemName: isDanger ? "forward.fill" : session.modeIcon)
+                        Image(systemName: session.modeIcon)
                             .font(.system(size: 9))
                             .foregroundColor(session.statusColor)
                             .shadow(color: session.statusColor.opacity(0.6), radius: session.status == "working" ? 4 : 0)
