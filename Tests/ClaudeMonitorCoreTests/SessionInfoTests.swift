@@ -235,6 +235,40 @@ final class SessionInfoTests: XCTestCase {
         }
     }
 
+    // MARK: - cmux_checkpoint
+
+    func testDecodeWithCmuxCheckpoint() throws {
+        let json = """
+        {"session_id":"s5","status":"idle","project":"p","cwd":"/p",
+         "terminal":"cmux","terminal_session_id":"","started_at":"","updated_at":"",
+         "last_prompt":"","agent_count":0,"cmux_checkpoint":"claude-36676"}
+        """
+        let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(session.cmux_checkpoint, "claude-36676")
+    }
+
+    func testDecodeWithoutCmuxCheckpointIsNil() throws {
+        let json = """
+        {"session_id":"s6","status":"idle","project":"p","cwd":"/p",
+         "terminal":"cmux","terminal_session_id":"","started_at":"","updated_at":"",
+         "last_prompt":"","agent_count":0}
+        """
+        let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
+        XCTAssertNil(session.cmux_checkpoint)
+    }
+
+    func testRoundTripCmuxCheckpoint() throws {
+        let original = SessionInfo(
+            session_id: "rt1", status: "idle", project: "p", cwd: "/p",
+            terminal: "cmux", terminal_session_id: "",
+            started_at: "", updated_at: "", last_prompt: "",
+            cmux_checkpoint: "claude-12345"
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(SessionInfo.self, from: data)
+        XCTAssertEqual(decoded.cmux_checkpoint, "claude-12345")
+    }
+
     // MARK: - modeLabel
 
     func testModeLabelForKnownModes() {

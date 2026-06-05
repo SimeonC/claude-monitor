@@ -41,6 +41,8 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
     public var cmux_surface_id: String?
     /// CMUX workspace UUID from the socket API.
     public var cmux_workspace_id: String?
+    /// CMUX tmux checkpoint name (e.g. "claude-36676") — stable across CMUX restarts.
+    public var cmux_checkpoint: String?
     /// When sessions are aggregated, holds all session_ids from the merged group.
     /// nil when no merge occurred (single session). Used for team lead matching post-aggregation.
     public var merged_session_ids: [String]?
@@ -51,7 +53,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         case session_id, status, project, cwd, terminal, terminal_session_id,
             started_at, updated_at, last_prompt, agent_count, parent_session_id, context_pct,
             model, skip_permissions, permission_mode, ghostty_terminal_id, cmux_surface_id,
-            cmux_workspace_id, merged_session_ids
+            cmux_workspace_id, cmux_checkpoint, merged_session_ids
     }
 
     public init(
@@ -62,7 +64,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         context_pct: Int? = nil, model: String? = nil, skip_permissions: Bool? = nil,
         permission_mode: String? = nil, ghostty_terminal_id: String? = nil,
         cmux_surface_id: String? = nil, cmux_workspace_id: String? = nil,
-        merged_session_ids: [String]? = nil
+        cmux_checkpoint: String? = nil, merged_session_ids: [String]? = nil
     ) {
         self.session_id = session_id
         self.status = status
@@ -82,6 +84,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         self.ghostty_terminal_id = ghostty_terminal_id
         self.cmux_surface_id = cmux_surface_id
         self.cmux_workspace_id = cmux_workspace_id
+        self.cmux_checkpoint = cmux_checkpoint
         self.merged_session_ids = merged_session_ids
     }
 
@@ -105,6 +108,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         ghostty_terminal_id = try? c.decode(String.self, forKey: .ghostty_terminal_id)
         cmux_surface_id = try? c.decode(String.self, forKey: .cmux_surface_id)
         cmux_workspace_id = try? c.decode(String.self, forKey: .cmux_workspace_id)
+        cmux_checkpoint = try? c.decode(String.self, forKey: .cmux_checkpoint)
         merged_session_ids = try? c.decode([String].self, forKey: .merged_session_ids)
     }
 

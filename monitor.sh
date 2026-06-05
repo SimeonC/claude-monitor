@@ -410,6 +410,7 @@ seed_tty_map() {
     if [ -n "${CMUX_SURFACE_ID:-}" ]; then
         CMUX_FRESH_SURFACE="$CMUX_LIVE_SURFACE"
         CMUX_FRESH_WORKSPACE="${CMUX_WORKSPACE_ID:-}"
+        CMUX_FRESH_CHECKPOINT="${CMUX_CHECKPOINT:-}"
         return 0
     fi
 
@@ -477,6 +478,7 @@ TERM_SID=$(echo "$TERM_INFO" | cut -d'|' -f2)
 # restarted and created a new surface), scan cmux-* sockets by our TTY to find
 # the current surface UUID.
 CMUX_LIVE_SURFACE=""
+_cmux_found_sock=""
 if [ "$TERM_APP" = "cmux" ] && [ -n "${TMUX:-}" ]; then
     _tmux_sock=$(echo "$TMUX" | cut -d',' -f1)
     _uuid=$(basename "$_tmux_sock" | sed 's/^cmux-//')
@@ -492,6 +494,7 @@ if [ "$TERM_APP" = "cmux" ] && [ -n "${TMUX:-}" ]; then
                 [ -S "$_s" ] || continue
                 if tmux -S "$_s" list-panes -a -F "#{pane_tty}" 2>/dev/null | grep -qF "$TERM_SID"; then
                     CMUX_LIVE_SURFACE=$(basename "$_s" | sed 's/^cmux-//')
+                    _cmux_found_sock="$_s"
                     break
                 fi
             done
@@ -500,6 +503,15 @@ if [ "$TERM_APP" = "cmux" ] && [ -n "${TMUX:-}" ]; then
 fi
 # Fallback: use frozen env var if detection failed (non-CMUX sessions, or no TMUX)
 [ -z "$CMUX_LIVE_SURFACE" ] && CMUX_LIVE_SURFACE="${CMUX_SURFACE_ID:-}"
+# Stable checkpoint: tmux session name survives CMUX restarts (surface/workspace UUIDs do not)
+CMUX_CHECKPOINT=""
+if [ "$TERM_APP" = "cmux" ]; then
+    if [ -n "$_cmux_found_sock" ]; then
+        CMUX_CHECKPOINT=$(tmux -S "$_cmux_found_sock" display-message -p '#{session_name}' 2>/dev/null || true)
+    elif [ -n "${TMUX:-}" ]; then
+        CMUX_CHECKPOINT=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+    fi
+fi
 
 # --- Sub-agent event handling ---
 if [ "$IS_SUBAGENT" = "true" ]; then
@@ -520,8 +532,9 @@ if [ "$IS_SUBAGENT" = "true" ]; then
                     --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
                     --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
                     --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
+                    --arg cmux_ckpt "${CMUX_FRESH_CHECKPOINT:-}" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, parent_session_id: $parent} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end | if $cmux_ckpt != "" then .cmux_checkpoint = $cmux_ckpt else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
                 ;;
             Notification)
@@ -628,9 +641,10 @@ ensure_session_file() {
         --arg terminal "$TERM_APP" --arg term_sid "$TERM_SID" \
         --arg csid "${CMUX_LIVE_SURFACE:-}" \
         --arg cwid "${CMUX_WORKSPACE_ID:-}" \
+        --arg ckpt "${CMUX_CHECKPOINT:-}" \
         --argjson skip "$skip_val" \
         --arg now "$NOW" \
-        '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end | if $skip then .skip_permissions = true else . end' \
+        '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end | if $ckpt != "" then .cmux_checkpoint = $ckpt else . end | if $skip then .skip_permissions = true else . end' \
         > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
@@ -645,7 +659,8 @@ backfill_terminal() {
         --arg term_sid "$TERM_SID" \
         --arg csid "${CMUX_LIVE_SURFACE:-}" \
         --arg cwid "${CMUX_WORKSPACE_ID:-}" \
-        '.updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end'
+        --arg ckpt "${CMUX_CHECKPOINT:-}" \
+        '.updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end | if $ckpt != "" then .cmux_checkpoint = $ckpt else . end'
 }
 
 # Helper: mark stale session files for the same terminal tab as dead (different session_id)
@@ -718,12 +733,13 @@ case "$EVENT" in
                 update_json_file "$SESSION_FILE" --arg gid "$GHOSTTY_RESOLVED_UUID" \
                     '.ghostty_terminal_id = $gid'
             fi
-            # Persist CMUX surface/workspace IDs if resolved
+            # Persist CMUX surface/workspace/checkpoint IDs if resolved
             if [ -n "${CMUX_FRESH_SURFACE:-}" ]; then
                 update_json_file "$SESSION_FILE" \
                     --arg csid "${CMUX_FRESH_SURFACE}" \
                     --arg cwid "${CMUX_FRESH_WORKSPACE:-}" \
-                    '.cmux_surface_id = $csid | if $cwid != "" then .cmux_workspace_id = $cwid else . end'
+                    --arg ckpt "${CMUX_FRESH_CHECKPOINT:-}" \
+                    '.cmux_surface_id = $csid | if $cwid != "" then .cmux_workspace_id = $cwid else . end | if $ckpt != "" then .cmux_checkpoint = $ckpt else . end'
             fi
             # Persist skip_permissions flag (clear if not detected)
             if [ "$SKIP_PERMS" = "true" ]; then
@@ -744,8 +760,9 @@ case "$EVENT" in
                     --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
                     --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
                     --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
+                    --arg cmux_ckpt "${CMUX_FRESH_CHECKPOINT:-}" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, skip_permissions: true} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, skip_permissions: true} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end | if $cmux_ckpt != "" then .cmux_checkpoint = $cmux_ckpt else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
             else
                 jq -n \
@@ -758,8 +775,9 @@ case "$EVENT" in
                     --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
                     --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
                     --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
+                    --arg cmux_ckpt "${CMUX_FRESH_CHECKPOINT:-}" \
                     --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end' \
+                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end | if $cmux_ckpt != "" then .cmux_checkpoint = $cmux_ckpt else . end' \
                     > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
             fi
         fi

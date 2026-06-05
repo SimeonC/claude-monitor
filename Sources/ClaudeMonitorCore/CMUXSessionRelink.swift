@@ -7,16 +7,22 @@ import Foundation
 /// those keys in the session file itself. Other keys are preserved so we never
 /// drop fields the hook owns (agent_count, skip_permissions, parent_session_id…).
 public enum CMUXSessionRelink {
-    /// Return the session JSON with `cmux_surface_id` set to `surfaceId`, and
-    /// `cmux_workspace_id` set to `workspaceId` when it is non-empty. All other
-    /// keys are left untouched. Returns nil if the input is not a JSON object.
-    public static func apply(jsonData: Data, surfaceId: String, workspaceId: String?) -> Data? {
+    /// Return the session JSON with `cmux_surface_id` set to `surfaceId`,
+    /// `cmux_workspace_id` set to `workspaceId` when non-empty, and
+    /// `cmux_checkpoint` set to `checkpoint` when non-empty. All other keys are left
+    /// untouched. Returns nil if the input is not a JSON object.
+    public static func apply(
+        jsonData: Data, surfaceId: String, workspaceId: String?, checkpoint: String?
+    ) -> Data? {
         guard var obj = (try? JSONSerialization.jsonObject(with: jsonData)) as? [String: Any] else {
             return nil
         }
         obj["cmux_surface_id"] = surfaceId
         if let w = workspaceId, !w.isEmpty {
             obj["cmux_workspace_id"] = w
+        }
+        if let ckpt = checkpoint, !ckpt.isEmpty {
+            obj["cmux_checkpoint"] = ckpt
         }
         return try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
     }

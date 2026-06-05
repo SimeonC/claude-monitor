@@ -6,10 +6,14 @@ import Foundation
 public struct FocusedSurface {
     public let id: String        // terminal-native surface identifier (UUID, GUID, TTY)
     public let tabName: String?  // tab/window title (used for CWD fallback matching)
+    /// CMUX: stable tmux checkpoint name (e.g. "claude-36676") derived from surface map.
+    /// nil for non-CMUX providers.
+    public let checkpoint: String?
 
-    public init(id: String, tabName: String? = nil) {
+    public init(id: String, tabName: String? = nil, checkpoint: String? = nil) {
         self.id = id
         self.tabName = tabName
+        self.checkpoint = checkpoint
     }
 }
 
@@ -40,9 +44,9 @@ public protocol TerminalProvider {
     func relinkSession(_ session: SessionInfo) -> String?
 
     /// For providers that match on a surface id stored in the session file (CMUX),
-    /// return the focused surface + workspace ids to persist into that file.
+    /// return the focused surface + workspace ids + checkpoint to persist into that file.
     /// Returns nil for providers that relink via `tty_map.json` instead (default). Blocking.
-    func relinkSurfaceIds() -> (surfaceId: String, workspaceId: String?)?
+    func relinkSurfaceIds() -> (surfaceId: String, workspaceId: String?, checkpoint: String?)?
 }
 
 // MARK: - Default implementations
@@ -50,7 +54,7 @@ public protocol TerminalProvider {
 public extension TerminalProvider {
     func relinkSession(_ session: SessionInfo) -> String? { nil }
     func liveSurfaceIds() -> Set<String> { [] }
-    func relinkSurfaceIds() -> (surfaceId: String, workspaceId: String?)? { nil }
+    func relinkSurfaceIds() -> (surfaceId: String, workspaceId: String?, checkpoint: String?)? { nil }
 }
 
 // MARK: - Shared candidate selection

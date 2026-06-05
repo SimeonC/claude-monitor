@@ -855,13 +855,13 @@ class SessionReader: ObservableObject {
                 self.ioQueue.async {
                     let path = "\(self.sessionsDir)/\(session.session_id).json"
                     guard let data = FileManager.default.contents(atPath: path),
-                          let out = CMUXSessionRelink.apply(jsonData: data, surfaceId: ids.surfaceId, workspaceId: ids.workspaceId) else {
+                          let out = CMUXSessionRelink.apply(jsonData: data, surfaceId: ids.surfaceId, workspaceId: ids.workspaceId, checkpoint: ids.checkpoint) else {
                         debugLog("relink: could not update session file \(path)")
                         return
                     }
                     do {
                         try out.write(to: URL(fileURLWithPath: path), options: .atomic)
-                        debugLog("relink: set cmux_surface_id=\(ids.surfaceId) workspace=\(ids.workspaceId ?? "-") for \(session.session_id)")
+                        debugLog("relink: set cmux_surface_id=\(ids.surfaceId) workspace=\(ids.workspaceId ?? "-") checkpoint=\(ids.checkpoint ?? "-") for \(session.session_id)")
                     } catch {
                         debugLog("relink: write failed for \(path): \(error)")
                     }
