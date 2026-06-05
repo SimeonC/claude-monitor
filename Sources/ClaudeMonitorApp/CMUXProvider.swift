@@ -80,4 +80,15 @@ class CMUXProvider: TerminalProvider {
         guard let r = socket.sendUnwrapped(method: "surface.current") else { return nil }
         return r["surface_ref"] as? String ?? r["surface_id"] as? String
     }
+
+    /// CMUX matching reads `cmux_surface_id` from the session file, so relink must
+    /// persist the focused surface there (handled by the caller). We return the
+    /// stable UUIDs — `surface_id`/`workspace_id`, not the positional `*_ref` —
+    /// so the link survives cmux re-layouts.
+    func relinkSurfaceIds() -> (surfaceId: String, workspaceId: String?)? {
+        guard let r = socket.sendUnwrapped(method: "surface.current"),
+              let sid = r["surface_id"] as? String, !sid.isEmpty else { return nil }
+        let wid = r["workspace_id"] as? String
+        return (sid, (wid?.isEmpty == false) ? wid : nil)
+    }
 }

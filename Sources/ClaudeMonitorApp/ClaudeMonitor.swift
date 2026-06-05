@@ -838,8 +838,9 @@ class SessionReader: ObservableObject {
     }
 
     /// Relink a session to the currently focused terminal surface.
-    /// Uses the appropriate TerminalProvider to get the focused surface ID,
-    /// then updates tty_map.json (TTY → UUID mapping).
+    /// CMUX (and other surface-id providers) persist the focused surface into the
+    /// session JSON — that's what matching/focus reads. Ghostty persists the
+    /// TTY → UUID mapping in tty_map.json instead.
     func relinkSession(_ session: SessionInfo) {
         guard let provider = providerFor(name: session.terminal) else {
             debugLog("relink: no provider for terminal '\(session.terminal)'")
@@ -847,6 +848,27 @@ class SessionReader: ObservableObject {
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+
+            // Surface-id providers (CMUX): write cmux_surface_id/_workspace_id into
+            // the session file, since matchSessions/focusSurface consult it directly.
+            if let ids = provider.relinkSurfaceIds() {
+                self.ioQueue.async {
+                    let path = "\(self.sessionsDir)/\(session.session_id).json"
+                    guard let data = FileManager.default.contents(atPath: path),
+                          let out = CMUXSessionRelink.apply(jsonData: data, surfaceId: ids.surfaceId, workspaceId: ids.workspaceId) else {
+                        debugLog("relink: could not update session file \(path)")
+                        return
+                    }
+                    do {
+                        try out.write(to: URL(fileURLWithPath: path), options: .atomic)
+                        debugLog("relink: set cmux_surface_id=\(ids.surfaceId) workspace=\(ids.workspaceId ?? "-") for \(session.session_id)")
+                    } catch {
+                        debugLog("relink: write failed for \(path): \(error)")
+                    }
+                }
+                return
+            }
+
             guard let uuid = provider.relinkSession(session) else {
                 debugLog("relink: provider returned nil for \(session.terminal)")
                 return

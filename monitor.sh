@@ -408,7 +408,7 @@ seed_tty_map() {
 
     # CMUX: use env vars directly (CMUX_SURFACE_ID is the session identifier)
     if [ -n "${CMUX_SURFACE_ID:-}" ]; then
-        CMUX_FRESH_SURFACE="$CMUX_SURFACE_ID"
+        CMUX_FRESH_SURFACE="$CMUX_LIVE_SURFACE"
         CMUX_FRESH_WORKSPACE="${CMUX_WORKSPACE_ID:-}"
         return 0
     fi
@@ -469,6 +469,37 @@ seed_tty_map() {
 TERM_INFO=$(detect_terminal)
 TERM_APP=$(echo "$TERM_INFO" | cut -d'|' -f1)
 TERM_SID=$(echo "$TERM_INFO" | cut -d'|' -f2)
+
+# CMUX: re-derive live surface UUID from $TMUX socket path on every invocation.
+# Each CMUX surface IS a separate tmux server; the socket name encodes the UUID.
+# $CMUX_SURFACE_ID is frozen at launch; $TMUX is also frozen but the socket's
+# liveness tells us if the surface is still valid. If the socket is dead (CMUX
+# restarted and created a new surface), scan cmux-* sockets by our TTY to find
+# the current surface UUID.
+CMUX_LIVE_SURFACE=""
+if [ "$TERM_APP" = "cmux" ] && [ -n "${TMUX:-}" ]; then
+    _tmux_sock=$(echo "$TMUX" | cut -d',' -f1)
+    _uuid=$(basename "$_tmux_sock" | sed 's/^cmux-//')
+    if echo "$_uuid" | grep -qE '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'; then
+        if [ -S "$_tmux_sock" ]; then
+            # Socket alive — this is the current surface
+            CMUX_LIVE_SURFACE="$_uuid"
+        else
+            # Socket dead: CMUX restarted and the surface was reassigned.
+            # Find current surface by scanning cmux-* sockets for our TTY.
+            _uid=$(id -u)
+            for _s in /private/tmp/tmux-${_uid}/cmux-*; do
+                [ -S "$_s" ] || continue
+                if tmux -S "$_s" list-panes -a -F "#{pane_tty}" 2>/dev/null | grep -qF "$TERM_SID"; then
+                    CMUX_LIVE_SURFACE=$(basename "$_s" | sed 's/^cmux-//')
+                    break
+                fi
+            done
+        fi
+    fi
+fi
+# Fallback: use frozen env var if detection failed (non-CMUX sessions, or no TMUX)
+[ -z "$CMUX_LIVE_SURFACE" ] && CMUX_LIVE_SURFACE="${CMUX_SURFACE_ID:-}"
 
 # --- Sub-agent event handling ---
 if [ "$IS_SUBAGENT" = "true" ]; then
@@ -595,7 +626,7 @@ ensure_session_file() {
         --arg sid "$SESSION_ID" --arg status "idle" \
         --arg project "$PROJECT" --arg cwd "${CWD:-}" \
         --arg terminal "$TERM_APP" --arg term_sid "$TERM_SID" \
-        --arg csid "${CMUX_SURFACE_ID:-}" \
+        --arg csid "${CMUX_LIVE_SURFACE:-}" \
         --arg cwid "${CMUX_WORKSPACE_ID:-}" \
         --argjson skip "$skip_val" \
         --arg now "$NOW" \
@@ -612,7 +643,7 @@ backfill_terminal() {
         --arg updated "$NOW" \
         --arg terminal "$TERM_APP" \
         --arg term_sid "$TERM_SID" \
-        --arg csid "${CMUX_SURFACE_ID:-}" \
+        --arg csid "${CMUX_LIVE_SURFACE:-}" \
         --arg cwid "${CMUX_WORKSPACE_ID:-}" \
         '.updated_at = $updated | if .terminal == "" then .terminal = $terminal | .terminal_session_id = $term_sid else . end | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end'
 }
