@@ -1,14 +1,26 @@
 import Foundation
+import ClaudeMonitorCore
 
 /// Lightweight Unix domain socket client for CMUX's JSON-over-socket API.
 /// Protocol: send `{"method": "...", "params": {...}}\n`, receive JSON response line.
 class CMUXSocketClient {
-    private let socketPath: String
+    private let explicitPath: String?
 
     init(socketPath: String? = nil) {
-        self.socketPath = socketPath
-            ?? ProcessInfo.processInfo.environment["CMUX_SOCKET_PATH"]
-            ?? NSHomeDirectory() + "/Library/Application Support/cmux/cmux.sock"
+        self.explicitPath = socketPath
+    }
+
+    /// Resolve the socket path fresh on every call. The monitor app is launched
+    /// from Finder/login and does not inherit `$CMUX_SOCKET_PATH`, and cmux's
+    /// socket location can change (XDG state dir vs legacy Application Support),
+    /// so we re-discover it each time rather than freezing it at init.
+    private var socketPath: String {
+        CMUXSocketPath.resolve(
+            explicit: explicitPath,
+            env: ProcessInfo.processInfo.environment,
+            home: NSHomeDirectory(),
+            fileExists: { FileManager.default.fileExists(atPath: $0) }
+        )
     }
 
     /// Send a JSON-RPC-style request and return the parsed response.
