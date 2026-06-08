@@ -1161,13 +1161,21 @@ class SessionReader: ObservableObject {
                 }
             }
         }
+        let teamNameBySession: [String: String] = loaded.reduce(into: [:]) { dict, s in
+            if let tn = self.sessionMetaCache[s.session_id]?.teamName {
+                dict[s.session_id] = tn
+            }
+        }
+        let parentIds = resolveTeamParents(
+            sessions: loaded,
+            teamNameBySession: teamNameBySession,
+            leadSessionByTeamName: teamLeadsByName
+        )
         for i in loaded.indices {
-            let cachedMeta = self.sessionMetaCache[loaded[i].session_id]
-            if let teamName = cachedMeta?.teamName,
-               let leadSid = teamLeadsByName[teamName],
-               loadedIds.contains(leadSid) {
-                loaded[i].parent_session_id = leadSid
-                debugLog("Linked agent \(loaded[i].session_id) (team: \(teamName)) → lead \(leadSid)")
+            if let parentId = parentIds[loaded[i].session_id] {
+                loaded[i].parent_session_id = parentId
+                let teamName = teamNameBySession[loaded[i].session_id] ?? "?"
+                debugLog("Linked agent \(loaded[i].session_id) (team: \(teamName)) → lead \(parentId)")
             }
         }
 
