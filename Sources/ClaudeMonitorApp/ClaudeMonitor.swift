@@ -1366,7 +1366,7 @@ class ActiveSessionTracker: ObservableObject {
             return
         }
         if terminalBundleIds.contains(bundleId) {
-            lastFocusedUUID = nil  // force re-check on app switch
+            backgroundQueue.async { self.lastFocusedUUID = nil }  // force re-check on app switch
             startPolling()
         } else {
             stopPolling()
@@ -1432,14 +1432,13 @@ class ActiveSessionTracker: ObservableObject {
         backgroundQueue.async { [weak self] in
             guard let self = self else { return }
             guard let surface = provider.focusedSurface() else {
-                DispatchQueue.main.async {
-                    self.lastFocusedUUID = nil
-                    self.activeSessionId = nil
-                }
+                // Socket unavailable (transient) — don't clear activeSessionId.
+                // stopPolling() clears it when CMUX definitively loses focus.
+                self.lastFocusedUUID = nil
                 return
             }
 
-            // Skip matching if focused surface hasn't changed
+            // Skip matching if focused surface hasn't changed (read/write on backgroundQueue only)
             if surface.id == self.lastFocusedUUID,
                let currentId = self.activeSessionId,
                sessions.contains(where: { $0.session_id == currentId }) {
@@ -1452,8 +1451,8 @@ class ActiveSessionTracker: ObservableObject {
             debugLog("detectActive(\(provider.name)): surface=\(surface.id) tab=\(surface.tabName ?? "nil") candidates=\(candidates.map { "\($0.session_id)(\($0.status))" }.joined(separator: ", "))")
 
             let best = bestCandidate(candidates)
+            self.lastFocusedUUID = surface.id
             DispatchQueue.main.async {
-                self.lastFocusedUUID = surface.id
                 self.activeSessionId = best?.session_id
             }
         }

@@ -19,7 +19,8 @@ class CMUXSocketClient {
             explicit: explicitPath,
             env: ProcessInfo.processInfo.environment,
             home: NSHomeDirectory(),
-            fileExists: { FileManager.default.fileExists(atPath: $0) }
+            fileExists: { FileManager.default.fileExists(atPath: $0) },
+            readFile: { try? String(contentsOfFile: $0, encoding: .utf8) }
         )
     }
 
