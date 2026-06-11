@@ -12,6 +12,8 @@ class CMUXProvider: TerminalProvider {
 
     private let socket = CMUXSocketClient()
 
+    var lastFocusError: CMUXSocketError? { socket.lastError }
+
     // MARK: - Workspace helpers
 
     private func activate() {

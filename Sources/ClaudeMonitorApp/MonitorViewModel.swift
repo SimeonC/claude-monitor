@@ -6,6 +6,7 @@ import ClaudeMonitorCore
 @MainActor
 final class MonitorViewModel: ObservableObject {
     @Published private(set) var snapshot: MonitorSnapshot = .empty
+    @Published var focusError: String?
 
     private weak var sessionReader: SessionReader?
     private weak var activeTracker: ActiveSessionTracker?
@@ -44,5 +45,16 @@ final class MonitorViewModel: ObservableObject {
 
     func delete(sessionId: String) {
         sessionReader?.deleteSession(sessionId)
+    }
+
+    func focus(_ session: SessionInfo, ttyMap: [String: String]) {
+        switchToSession(session, ttyMap: ttyMap) { [weak self] msg in
+            guard let self, self.focusError != msg else { return }
+            self.focusError = msg
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                if self?.focusError == msg { self?.focusError = nil }
+            }
+        }
+        setActive(sessionId: session.session_id)
     }
 }

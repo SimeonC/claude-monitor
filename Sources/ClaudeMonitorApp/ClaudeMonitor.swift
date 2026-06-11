@@ -1489,10 +1489,13 @@ func debugLog(_ message: String) {
 
 // MARK: - Terminal Switcher
 
-func switchToSession(_ session: SessionInfo, ttyMap: [String: String] = [:]) {
+func switchToSession(_ session: SessionInfo, ttyMap: [String: String] = [:], onError: ((String) -> Void)? = nil) {
     debugLog("switchToSession: terminal=\(session.terminal) tty=\(session.terminal_session_id) project=\(session.project) sid=\(session.session_id)")
     if let provider = providerFor(name: session.terminal) {
         provider.focusSurface(session: session, ttyMap: ttyMap)
+        if (provider as? CMUXProvider)?.lastFocusError == .accessDenied {
+            onError?("cmux blocked the jump. Set \"automation\": { \"socketControlMode\": \"allowAll\" } in ~/.config/cmux/cmux.json and restart cmux.")
+        }
     } else {
         debugLog("switchToSession: no provider for '\(session.terminal)', falling back to CWD")
         switchByTerminalCwd(cwd: session.cwd)
@@ -2003,6 +2006,25 @@ struct MonitorContentView: View {
                 sessions: vm.snapshot.rows.map { $0.session }, sessionReader: reader,
                 shortcutManager: shortcutManager)
 
+            if let errorMsg = vm.focusError {
+                HStack(spacing: 6) {
+                    Text(errorMsg)
+                        .font(.system(size: 11))
+                        .foregroundColor(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button(action: { vm.focusError = nil }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.red.opacity(0.75))
+            }
+
             if isExpanded && !vm.snapshot.rows.isEmpty {
                 Divider()
                     .background(Color.white.opacity(0.1))
@@ -2015,8 +2037,7 @@ struct MonitorContentView: View {
                                 .overlay(
                                     FirstMouseClickArea(
                                         action: {
-                                            switchToSession(row.session, ttyMap: reader.ttyMap)
-                                            vm.setActive(sessionId: row.session.session_id)
+                                            vm.focus(row.session, ttyMap: reader.ttyMap)
                                         },
                                         contextMenuBuilder: { event in
                                             let menu = NSMenu()

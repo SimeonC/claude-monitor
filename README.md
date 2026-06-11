@@ -162,7 +162,7 @@ Then remove the hook entries from `~/.claude/settings.json`.
 
 If you use [cmux](https://cmux.dev), two extra steps are needed for click-to-switch and focus detection:
 
-1. **Enable external socket access** — Open cmux Settings and set Socket Access Mode to `allowAll`, or launch cmux with `CMUX_SOCKET_MODE=allowAll`. This allows the monitor (which runs outside cmux) to switch workspaces via the socket API.
+1. **Enable external socket access** — Add `"automation": { "socketControlMode": "allowAll" }` to `~/.config/cmux/cmux.json` and restart cmux. This allows the monitor (which runs outside cmux) to switch workspaces via the socket API.
 
 2. **Install the cmux CLI to PATH** — Inside cmux, open the Command Palette (`Cmd+Shift+P`) and run **"Shell Command: Install 'cmux' in PATH"**. This enables `cmux notify` calls from hooks for attention/completion notifications.
 

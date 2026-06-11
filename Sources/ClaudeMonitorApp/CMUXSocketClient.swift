@@ -1,10 +1,17 @@
 import Foundation
 import ClaudeMonitorCore
 
+enum CMUXSocketError: Equatable {
+    case accessDenied
+    case unreachable
+    case malformedResponse
+}
+
 /// Lightweight Unix domain socket client for CMUX's JSON-over-socket API.
 /// Protocol: send `{"method": "...", "params": {...}}\n`, receive JSON response line.
 class CMUXSocketClient {
     private let explicitPath: String?
+    private(set) var lastError: CMUXSocketError?
 
     init(socketPath: String? = nil) {
         self.explicitPath = socketPath
@@ -58,8 +65,11 @@ class CMUXSocketClient {
 
     /// Send a JSON-RPC-style request and return the parsed response.
     func send(method: String, params: [String: Any]? = nil) -> [String: Any]? {
+        lastError = nil
+
         guard let fd = connect(to: socketPath) else {
             debugLog("CMUXSocket: connect failed: \(errno)")
+            lastError = .unreachable
             return nil
         }
         defer { close(fd) }
@@ -71,17 +81,22 @@ class CMUXSocketClient {
         }
         guard let jsonData = try? JSONSerialization.data(withJSONObject: request),
               var jsonString = String(data: jsonData, encoding: .utf8) else {
+            lastError = .unreachable
             return nil
         }
         jsonString += "\n"
 
         // Send
-        guard let sendData = jsonString.data(using: .utf8) else { return nil }
+        guard let sendData = jsonString.data(using: .utf8) else {
+            lastError = .unreachable
+            return nil
+        }
         let sent = sendData.withUnsafeBytes { buf in
             Darwin.send(fd, buf.baseAddress!, buf.count, 0)
         }
         guard sent == sendData.count else {
             debugLog("CMUXSocket: send failed")
+            lastError = .unreachable
             return nil
         }
 
@@ -96,8 +111,22 @@ class CMUXSocketClient {
             if responseData.count > 65536 { break }
         }
 
-        guard !responseData.isEmpty,
-              let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+        guard !responseData.isEmpty else {
+            lastError = .unreachable
+            return nil
+        }
+
+        // Detect access-denied before attempting JSON parse (cmux returns a plain-text error)
+        if let raw = String(data: responseData, encoding: .utf8) {
+            if raw.contains("Access denied") || raw.contains("only processes started inside cmux") {
+                debugLog("CMUXSocket: access denied")
+                lastError = .accessDenied
+                return nil
+            }
+        }
+
+        guard let parsed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            lastError = .malformedResponse
             return nil
         }
         return parsed
