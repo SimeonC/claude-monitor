@@ -20,24 +20,26 @@ class CMUXSocketClient {
             env: ProcessInfo.processInfo.environment,
             home: NSHomeDirectory(),
             fileExists: { FileManager.default.fileExists(atPath: $0) },
-            readFile: { try? String(contentsOfFile: $0, encoding: .utf8) }
+            readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
+            probe: { [weak self] path in
+                guard let self = self, let fd = self.connect(to: path) else { return false }
+                close(fd)
+                return true
+            },
+            listDir: { (try? FileManager.default.contentsOfDirectory(atPath: $0)) ?? [] }
         )
     }
 
-    /// Send a JSON-RPC-style request and return the parsed response.
-    func send(method: String, params: [String: Any]? = nil) -> [String: Any]? {
+    /// Open a Unix-domain connection to `path`. Returns an open fd on success, nil on failure.
+    private func connect(to path: String) -> Int32? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            debugLog("CMUXSocket: socket() failed: \(errno)")
-            return nil
-        }
-        defer { close(fd) }
+        guard fd >= 0 else { return nil }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = socketPath.utf8CString
+        let pathBytes = path.utf8CString
         guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
-            debugLog("CMUXSocket: path too long")
+            close(fd)
             return nil
         }
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
@@ -47,16 +49,22 @@ class CMUXSocketClient {
                 }
             }
         }
-
-        let connectResult = withUnsafePointer(to: &addr) { ptr in
+        let result = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
                 Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard connectResult == 0 else {
+        guard result == 0 else { close(fd); return nil }
+        return fd
+    }
+
+    /// Send a JSON-RPC-style request and return the parsed response.
+    func send(method: String, params: [String: Any]? = nil) -> [String: Any]? {
+        guard let fd = connect(to: socketPath) else {
             debugLog("CMUXSocket: connect failed: \(errno)")
             return nil
         }
+        defer { close(fd) }
 
         // Build request JSON
         var request: [String: Any] = ["method": method]

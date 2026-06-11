@@ -159,4 +159,73 @@ final class CMUXSocketPathTests: XCTestCase {
         )
         XCTAssertEqual(p, envSock)
     }
+
+    // MARK: - Probe-first selection
+
+    func testProbeSkipsDeadHigherPrioritySocketPicksLiveOne() {
+        // CMUX_SOCKET_PATH points to a dead orphan; hint points to the live socket.
+        // Without probe the dead orphan would be returned (exists=true, first candidate).
+        let dead = "/dead/cmux.sock"
+        let live = "/Users/test/.local/state/cmux/cmux-502.sock"
+        let p = CMUXSocketPath.resolve(
+            explicit: nil,
+            env: ["CMUX_SOCKET_PATH": dead],
+            home: home,
+            fileExists: { _ in true },
+            readFile: { path in path.hasSuffix("last-socket-path") ? live + "\n" : nil },
+            probe: { path in path == live }
+        )
+        XCTAssertEqual(p, live)
+    }
+
+    // MARK: - Glob discovery
+
+    func testGlobDiscoversCmuxUIDSocketWithNoHint() {
+        // No hint file; listDir returns a numbered socket alongside the generic one.
+        // The numbered socket probes live; the generic probes dead.
+        let dir = "/Users/test/.local/state/cmux"
+        let numbered = dir + "/cmux-502.sock"
+        let generic = dir + "/cmux.sock"
+        let p = CMUXSocketPath.resolve(
+            explicit: nil,
+            env: [:],
+            home: home,
+            fileExists: { $0 == numbered || $0 == generic },
+            readFile: { _ in nil },
+            probe: { path in path == numbered },
+            listDir: { d in d == dir ? ["cmux-502.sock", "cmux.sock"] : [] }
+        )
+        XCTAssertEqual(p, numbered)
+    }
+
+    func testHintOutranksGlobbedSiblingWhenBothProbeLive() {
+        // Hint and glob both surface live sockets; hint must win (it's higher priority).
+        let dir = "/Users/test/.local/state/cmux"
+        let hintSock = dir + "/cmux-502.sock"
+        let globSock = dir + "/cmux-503.sock"
+        let p = CMUXSocketPath.resolve(
+            explicit: nil,
+            env: [:],
+            home: home,
+            fileExists: { _ in true },
+            readFile: { path in path.hasSuffix("last-socket-path") ? hintSock + "\n" : nil },
+            probe: { _ in true },
+            listDir: { d in d == dir ? ["cmux-503.sock", "cmux-502.sock", "cmux.sock"] : [] }
+        )
+        XCTAssertEqual(p, hintSock)
+    }
+
+    func testDedupHintEqualsGlobbedPath() {
+        // hint == a globbed entry; candidate list must not contain it twice.
+        let dir = "/Users/test/.local/state/cmux"
+        let sock = dir + "/cmux-502.sock"
+        let cands = CMUXSocketPath.candidates(
+            env: [:],
+            home: home,
+            readFile: { path in path.hasSuffix("last-socket-path") ? sock + "\n" : nil },
+            listDir: { d in d == dir ? ["cmux-502.sock", "cmux.sock"] : [] }
+        )
+        let count = cands.filter { $0 == sock }.count
+        XCTAssertEqual(count, 1, "duplicate candidate: \(cands)")
+    }
 }
