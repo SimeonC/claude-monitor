@@ -21,11 +21,6 @@ class CMUXSocketClient {
             home: NSHomeDirectory(),
             fileExists: { FileManager.default.fileExists(atPath: $0) },
             readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
-            probe: { [weak self] path in
-                guard let self = self, let fd = self.connect(to: path) else { return false }
-                close(fd)
-                return true
-            },
             listDir: { (try? FileManager.default.contentsOfDirectory(atPath: $0)) ?? [] }
         )
     }
@@ -34,6 +29,9 @@ class CMUXSocketClient {
     private func connect(to path: String) -> Int32? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
+        // Prevent SIGPIPE if the remote closes during write; handle errors via return value instead.
+        var noSigPipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
