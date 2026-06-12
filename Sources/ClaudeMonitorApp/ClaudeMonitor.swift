@@ -1680,10 +1680,10 @@ struct SessionRowView: View, Equatable {
                 if let pct = session.context_pct {
                     Text("\(pct)%")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(session.contextPctColor.opacity(0.7))
+                        .foregroundColor(contextPctColor(session.context_pct).opacity(0.7))
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
-                        .background(Capsule().fill(session.contextPctColor.opacity(0.10)))
+                        .background(Capsule().fill(contextPctColor(session.context_pct).opacity(0.10)))
                         .fixedSize()
                 }
             }
@@ -1731,10 +1731,10 @@ struct SessionRowView: View, Equatable {
                     if let pct = session.context_pct {
                         Text("\(pct)%")
                             .font(.system(size: 10.8, weight: .medium, design: .monospaced))
-                            .foregroundColor(session.contextPctColor)
+                            .foregroundColor(contextPctColor(session.context_pct))
                             .padding(.horizontal, 4)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(session.contextPctColor.opacity(0.15)))
+                            .background(Capsule().fill(contextPctColor(session.context_pct).opacity(0.15)))
                             .fixedSize()
                     }
                 }

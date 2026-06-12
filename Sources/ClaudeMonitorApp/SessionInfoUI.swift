@@ -29,5 +29,4 @@ extension SessionInfo {
         }
     }
 
-    var contextPctColor: Color { ClaudeCodeMonitor.contextPctColor(context_pct) }
 }
