@@ -155,4 +155,54 @@ final class SnapshotBuilderTests: XCTestCase {
         let snap = buildSnapshot(sessions: [s], teams: [:], activeId: nil, generation: 0)
         XCTAssertEqual(snap.rows[0].statusBucket, .other)
     }
+
+    // MARK: - Identity hash — customTitle
+
+    func test_computeIdentityHash_differentCustomTitle_differentHash() {
+        let base = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            permissionMode: nil, customTitle: nil
+        )
+        let withTitle = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            permissionMode: nil, customTitle: "tablecheck/settings-frontend#2169:core"
+        )
+        XCTAssertNotEqual(base, withTitle)
+    }
+
+    func test_computeIdentityHash_sameCustomTitle_stableHash() {
+        let h1 = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            permissionMode: nil, customTitle: "demo-title"
+        )
+        let h2 = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            permissionMode: nil, customTitle: "demo-title"
+        )
+        XCTAssertEqual(h1, h2)
+    }
+
+    func test_computeIdentityHash_nilCustomTitle_stableHash() {
+        let h1 = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            permissionMode: nil, customTitle: nil
+        )
+        let h2 = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            permissionMode: nil, customTitle: nil
+        )
+        XCTAssertEqual(h1, h2)
+    }
 }

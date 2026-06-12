@@ -196,6 +196,7 @@ final class Debouncer {
 struct SessionMeta {
     var isSubagent: Bool
     var teamName: String?
+    var customTitle: String?
     /// JSONL mtime when this meta was last read; nil means never read or mtime unknown.
     var jsonlMtime: Date?
 }
@@ -215,6 +216,7 @@ struct DerivedSessionData {
     var project: String
     var cwd: String
     var agentCount: Int
+    var customTitle: String?
     var jsonlMtime: Date?
     var jsonlBirthDate: Date?
     var jsonlPath: String?
@@ -400,21 +402,22 @@ class SessionReader: ObservableObject {
         }
     }
 
-    /// Read the head of a JSONL file (first 8KB) to extract static metadata: agentName, teamName.
+    /// Read the head of a JSONL file (first 8KB) to extract static metadata: agentName, teamName, customTitle.
     private func readJSONLHead(path: String) -> SessionMeta {
         guard let fileHandle = FileHandle(forReadingAtPath: path) else {
-            return SessionMeta(isSubagent: false, teamName: nil)
+            return SessionMeta(isSubagent: false, teamName: nil, customTitle: nil)
         }
         defer { fileHandle.closeFile() }
 
         let readSize: UInt64 = 8192
         let data = fileHandle.readData(ofLength: Int(readSize))
         guard let text = String(data: data, encoding: .utf8) else {
-            return SessionMeta(isSubagent: false, teamName: nil)
+            return SessionMeta(isSubagent: false, teamName: nil, customTitle: nil)
         }
 
         var isSubagent = false
         var teamName: String? = nil
+        var customTitle: String? = nil
 
         let lines = text.components(separatedBy: "\n")
         for line in lines {
@@ -429,10 +432,14 @@ class SessionReader: ObservableObject {
             if let tn = json["teamName"] as? String, !tn.isEmpty {
                 teamName = tn
             }
+            if json["type"] as? String == "custom-title",
+               let ct = json["customTitle"] as? String, !ct.isEmpty {
+                customTitle = ct
+            }
             if isSubagent && teamName != nil { break }
         }
 
-        return SessionMeta(isSubagent: isSubagent, teamName: teamName)
+        return SessionMeta(isSubagent: isSubagent, teamName: teamName, customTitle: customTitle)
     }
 
     /// Find the JSONL file path for a session ID by scanning project directories.
@@ -537,6 +544,7 @@ class SessionReader: ObservableObject {
                         project: project,
                         cwd: cwd,
                         agentCount: agentCount,
+                        customTitle: meta.customTitle,
                         jsonlMtime: mtime,
                         jsonlBirthDate: birthDate,
                         jsonlPath: jsonlPath
@@ -972,6 +980,7 @@ class SessionReader: ObservableObject {
                         enriched.cwd = derived.cwd
                     }
                     enriched.agent_count = derived.agentCount
+                    enriched.custom_title = derived.customTitle
                 }
                 loaded.append(enriched)
                 loadedIds.insert(sessionId)
@@ -1056,13 +1065,14 @@ class SessionReader: ObservableObject {
                     jsonMtime: jsonMtime, contextMtime: contextMtime, modelMtime: modelMtime,
                     info: session
                 )
-                // Enrich with JSONL-derived data (project, cwd, agent_count)
+                // Enrich with JSONL-derived data (project, cwd, agent_count, custom_title)
                 if let derived = derivedData[session.session_id] {
                     if session.project == "unknown" || session.cwd.isEmpty {
                         session.project = derived.project
                         session.cwd = derived.cwd
                     }
                     session.agent_count = derived.agentCount
+                    session.custom_title = derived.customTitle
                 }
                 loaded.append(session)
                 loadedIds.insert(session.session_id)
@@ -1137,7 +1147,8 @@ class SessionReader: ObservableObject {
                 terminal: "", terminal_session_id: "",
                 started_at: startedAtString, updated_at: nowString,
                 last_prompt: "",
-                agent_count: derived.agentCount
+                agent_count: derived.agentCount,
+                custom_title: derived.customTitle
             )
             loaded.append(session)
         }
@@ -1644,7 +1655,7 @@ struct SessionRowView: View, Equatable {
                             .offset(y: 1)
                     }
 
-                    Text(session.project)
+                    Text(session.custom_title ?? session.project)
                         .font(.system(size: 13, weight: .semibold, design: .default))
                         .foregroundColor(session.isStale ? .gray : .white)
                         .lineLimit(1)

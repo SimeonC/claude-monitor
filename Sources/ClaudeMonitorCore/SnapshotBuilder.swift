@@ -40,7 +40,8 @@ func computeIdentityHash(
     updatedAt: String,
     teamName: String?,
     isActive: Bool,
-    permissionMode: String? = nil
+    permissionMode: String? = nil,
+    customTitle: String? = nil
 ) -> UInt64 {
     var h = fnv1a(status)
     h = fnv1a(displayName, seed: h)
@@ -52,6 +53,7 @@ func computeIdentityHash(
     }
     h = fnv1a(teamName ?? "\u{0}", seed: h)
     h = fnv1a(permissionMode ?? "\u{0}", seed: h)
+    h = fnv1a(customTitle ?? "\u{0}", seed: h)
     if isActive { h ^= 0xFFFF_FFFF_FFFF_FFFF }
     return h
 }
@@ -101,7 +103,8 @@ public func buildSnapshot(
             updatedAt: session.updated_at,
             teamName: team?.name,
             isActive: isActive,
-            permissionMode: session.permission_mode
+            permissionMode: session.permission_mode,
+            customTitle: session.custom_title
         )
         rows.append(
             SessionRow(

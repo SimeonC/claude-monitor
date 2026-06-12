@@ -46,6 +46,8 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
     /// When sessions are aggregated, holds all session_ids from the merged group.
     /// nil when no merge occurred (single session). Used for team lead matching post-aggregation.
     public var merged_session_ids: [String]?
+    /// Custom display name set via `--name`/`-n` flag or `/rename` command.
+    public var custom_title: String?
 
     public var id: String { session_id }
 
@@ -53,7 +55,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         case session_id, status, project, cwd, terminal, terminal_session_id,
             started_at, updated_at, last_prompt, agent_count, parent_session_id, context_pct,
             model, skip_permissions, permission_mode, ghostty_terminal_id, cmux_surface_id,
-            cmux_workspace_id, cmux_checkpoint, merged_session_ids
+            cmux_workspace_id, cmux_checkpoint, merged_session_ids, custom_title
     }
 
     public init(
@@ -64,7 +66,8 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         context_pct: Int? = nil, model: String? = nil, skip_permissions: Bool? = nil,
         permission_mode: String? = nil, ghostty_terminal_id: String? = nil,
         cmux_surface_id: String? = nil, cmux_workspace_id: String? = nil,
-        cmux_checkpoint: String? = nil, merged_session_ids: [String]? = nil
+        cmux_checkpoint: String? = nil, merged_session_ids: [String]? = nil,
+        custom_title: String? = nil
     ) {
         self.session_id = session_id
         self.status = status
@@ -86,6 +89,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         self.cmux_workspace_id = cmux_workspace_id
         self.cmux_checkpoint = cmux_checkpoint
         self.merged_session_ids = merged_session_ids
+        self.custom_title = custom_title
     }
 
     public init(from decoder: Decoder) throws {
@@ -110,6 +114,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         cmux_workspace_id = try? c.decode(String.self, forKey: .cmux_workspace_id)
         cmux_checkpoint = try? c.decode(String.self, forKey: .cmux_checkpoint)
         merged_session_ids = try? c.decode([String].self, forKey: .merged_session_ids)
+        custom_title = try? c.decode(String.self, forKey: .custom_title)
     }
 
     public var shortModelName: String? {
