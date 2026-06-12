@@ -1785,6 +1785,7 @@ struct SessionRowView: View, Equatable {
 struct CogButton: View {
     @ObservedObject var shortcutManager: ShortcutManager
     var sessionReader: SessionReader?
+    @ObservedObject var hover: PanelHoverState
     @State private var showPopover = false
     @State private var recordingSlot: Int?  // nil = not recording, 1 or 2
     @State private var recordingMonitor: Any?
@@ -1844,6 +1845,7 @@ struct CogButton: View {
         }
         .onChange(of: showPopover) { _, newValue in
             if !newValue { stopRecording() }
+            hover.isSettingsOpen = newValue
         }
     }
 
@@ -2029,7 +2031,7 @@ struct HeaderBar: View {
                 .focusable(false)
                 .fixedSize()
 
-                CogButton(shortcutManager: shortcutManager, sessionReader: sessionReader)
+                CogButton(shortcutManager: shortcutManager, sessionReader: sessionReader, hover: hover)
                     .fixedSize()
             }
             .layoutPriority(1)
@@ -2313,7 +2315,8 @@ struct VisualEffectView: NSViewRepresentable {
 final class PanelHoverState: ObservableObject {
     @Published var isHovering = false
     @Published var isPinned = false
-    var isExpanded: Bool { isHovering || isPinned }
+    @Published var isSettingsOpen = false
+    var isExpanded: Bool { isHovering || isPinned || isSettingsOpen }
 }
 
 // MARK: - Floating Panel
