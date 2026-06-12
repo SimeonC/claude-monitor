@@ -1262,20 +1262,25 @@ class SessionReader: ObservableObject {
         // Replace loaded with parent-only sessions (children are hidden from UI)
         loaded = parentSessions
 
-        // Aggregate sessions with the same project name
-        var aggregated = aggregateSessions(loaded, referenceDate: Date())
+        // Separate headless sessions so they sort to the bottom and aggregate independently
+        let interactiveLoaded = loaded.filter { $0.is_headless != true }
+        let headlessLoaded    = loaded.filter { $0.is_headless == true }
 
-        // Sort by project → numeric terminal_session_id → string terminal_session_id → cwd
-        aggregated.sort {
-            let cmp = $0.project.localizedCaseInsensitiveCompare($1.project)
+        let sessionComparator: (SessionInfo, SessionInfo) -> Bool = { a, b in
+            let cmp = a.project.localizedCaseInsensitiveCompare(b.project)
             if cmp != .orderedSame { return cmp == .orderedAscending }
-            let tid0 = $0.terminal_session_id
-            let tid1 = $1.terminal_session_id
-            // Numeric comparison when both are pure digits
+            let tid0 = a.terminal_session_id
+            let tid1 = b.terminal_session_id
             if let n0 = Int(tid0), let n1 = Int(tid1) { return n0 < n1 }
             if tid0 != tid1 { return tid0 < tid1 }
-            return $0.cwd.localizedCaseInsensitiveCompare($1.cwd) == .orderedAscending
+            return a.cwd.localizedCaseInsensitiveCompare(b.cwd) == .orderedAscending
         }
+
+        var aggregated = aggregateSessions(interactiveLoaded, referenceDate: Date())
+        aggregated.sort(by: sessionComparator)
+        var headlessAgg = aggregateSessions(headlessLoaded, referenceDate: Date())
+        headlessAgg.sort(by: sessionComparator)
+        aggregated += headlessAgg
 
         // Debug: dump pipeline state to JSON (rate-limited to ≤1 write/sec)
         let sinceLastDump = now.timeIntervalSince(lastDebugDumpAt)
@@ -1579,6 +1584,7 @@ struct SessionRowView: View, Equatable {
 
     private var session: SessionInfo { row.session }
     private var isDanger: Bool { session.skip_permissions == true }
+    private var isHeadless: Bool { session.is_headless == true }
     private var hasTeam: Bool { row.team != nil }
 
     private var badgeCount: Int {
@@ -1633,7 +1639,67 @@ struct SessionRowView: View, Equatable {
             .help(session.modeLabel ?? (isDanger ? "Bypass permissions (--dangerously-skip-permissions)" : ""))
     }
 
+    @ViewBuilder
+    private var headlessRow: some View {
+        HStack(alignment: .center, spacing: 0) {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(Color.clear)
+                .frame(width: 3)
+                .padding(.vertical, 4)
+
+            Spacer().frame(width: 5)
+
+            Image(systemName: "gearshape.2.fill")
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.5))
+                .frame(width: 16, height: 16)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.08)))
+
+            Spacer().frame(width: 7)
+
+            HStack(spacing: 6) {
+                Text(session.custom_title ?? session.project)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.white.opacity(0.7))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+
+                if let modelName = session.shortModelName {
+                    Text(modelName)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.35))
+                        .fixedSize()
+                }
+
+                Text(session.elapsedString)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.35))
+                    .fixedSize()
+
+                if let pct = session.context_pct {
+                    Text("\(pct)%")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(session.contextPctColor.opacity(0.7))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(session.contextPctColor.opacity(0.10)))
+                        .fixedSize()
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 5)
+        .padding(.trailing, 12)
+        .padding(.vertical, 6)
+        .opacity(0.45)
+    }
+
     var body: some View {
+        if isHeadless {
+            headlessRow
+        } else {
         HStack(alignment: .top, spacing: 0) {
             RoundedRectangle(cornerRadius: 1)
                 .fill(Color(red: 45/255, green: 191/255, blue: 230/255).opacity(row.isActive ? 0.8 : 0))
@@ -1710,6 +1776,7 @@ struct SessionRowView: View, Equatable {
         .padding(.trailing, 12)
         .padding(.vertical, 8)
         .onHover { isHovered = $0 }
+        }
     }
 }
 
@@ -1938,6 +2005,17 @@ struct HeaderBar: View {
                     }
                     .fixedSize()
                 }
+                if counts.headless > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "gearshape.2.fill")
+                            .font(.system(size: 8))
+                            .foregroundColor(.white.opacity(0.4))
+                        Text("\(counts.headless)")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.4))
+                    }
+                    .fixedSize()
+                }
 
                 // Pin button — keeps panel expanded after mouse-out
                 Button {
@@ -1978,10 +2056,20 @@ struct CompactSummaryView: View {
                     .font(.system(size: 18, weight: .semibold, design: .monospaced))
                     .foregroundColor(.workingBlue)
             }
-            if counts.idle > 0 || (counts.attention == 0 && counts.working == 0) {
+            if counts.idle > 0 || (counts.attention == 0 && counts.working == 0 && counts.headless == 0) {
                 Text("\(counts.idle)")
                     .font(.system(size: 18, weight: .semibold, design: .monospaced))
                     .foregroundColor(.doneGreen)
+            }
+            if counts.headless > 0 && counts.attention == 0 && counts.working == 0 && counts.idle == 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "gearshape.2.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(.white.opacity(0.4))
+                    Text("\(counts.headless)")
+                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.4))
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -2077,12 +2165,13 @@ struct MonitorContentView: View {
                                     .equatable()
                                     .overlay(
                                         FirstMouseClickArea(
-                                            action: {
+                                            action: row.session.is_headless == true ? {} : {
                                                 vm.focus(row.session, ttyMap: reader.ttyMap)
                                             },
                                             contextMenuBuilder: { event in
                                                 let menu = NSMenu()
-                                                if providerFor(name: row.session.terminal) != nil {
+                                                if row.session.is_headless != true,
+                                                   providerFor(name: row.session.terminal) != nil {
                                                     menu.addItem(ClosureMenuItem("Relink to Focused Tab") {
                                                         vm.relink(row.session)
                                                     })

@@ -248,6 +248,25 @@ detect_skip_permissions() {
     return 1
 }
 
+# --- Detect headless/non-interactive mode (--print / -p flag or CLAUDE_HEADLESS env var) ---
+# Walk up process tree to first `claude` ancestor and check its args.
+detect_headless() {
+    local pid=$$
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        [ -z "$pid" ] || [ "$pid" = "1" ] || [ "$pid" = "0" ] && break
+        local comm
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null)
+        if [ "$comm" = "claude" ]; then
+            if ps -ww -o args= -p "$pid" 2>/dev/null | grep -qE -- '(^| )(-p|--print)( |$)'; then
+                return 0
+            fi
+            return 1
+        fi
+    done
+    return 1
+}
+
 # --- Monitor process-tree helpers ---
 
 # Return the PID of the first `claude` ancestor of this script.
@@ -635,6 +654,8 @@ ensure_session_file() {
     fi
     local skip_val="false"
     if detect_skip_permissions || [ -n "${DEVCONTAINER:-}" ]; then skip_val="true"; fi
+    local headless_val="false"
+    if detect_headless || [ -n "${CLAUDE_HEADLESS:-}" ]; then headless_val="true"; fi
     jq -n \
         --arg sid "$SESSION_ID" --arg status "idle" \
         --arg project "$PROJECT" --arg cwd "${CWD:-}" \
@@ -643,8 +664,9 @@ ensure_session_file() {
         --arg cwid "${CMUX_WORKSPACE_ID:-}" \
         --arg ckpt "${CMUX_CHECKPOINT:-}" \
         --argjson skip "$skip_val" \
+        --argjson headless "$headless_val" \
         --arg now "$NOW" \
-        '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end | if $ckpt != "" then .cmux_checkpoint = $ckpt else . end | if $skip then .skip_permissions = true else . end' \
+        '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $csid != "" then .cmux_surface_id = $csid else . end | if $cwid != "" then .cmux_workspace_id = $cwid else . end | if $ckpt != "" then .cmux_checkpoint = $ckpt else . end | if $skip then .skip_permissions = true else . end | if $headless then .is_headless = true else . end' \
         > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 }
 
@@ -718,6 +740,11 @@ case "$EVENT" in
         else
             SKIP_PERMS=false
         fi
+        if detect_headless || [ -n "${CLAUDE_HEADLESS:-}" ]; then
+            HEADLESS=true
+        else
+            HEADLESS=false
+        fi
         if [ -f "$SESSION_FILE" ] && [ -s "$SESSION_FILE" ]; then
             # Session file exists — backfill terminal and reboot if dead
             backfill_terminal
@@ -747,39 +774,30 @@ case "$EVENT" in
             else
                 update_json_file "$SESSION_FILE" 'del(.skip_permissions)'
             fi
+            # Persist is_headless flag (clear if not detected)
+            if [ "$HEADLESS" = "true" ]; then
+                update_json_file "$SESSION_FILE" '.is_headless = true'
+            else
+                update_json_file "$SESSION_FILE" 'del(.is_headless)'
+            fi
         else
             # New session — create file with "starting" status
-            if [ "$SKIP_PERMS" = "true" ]; then
-                jq -n \
-                    --arg sid "$SESSION_ID" \
-                    --arg status "starting" \
-                    --arg project "$PROJECT" \
-                    --arg cwd "${CWD:-}" \
-                    --arg terminal "$TERM_APP" \
-                    --arg term_sid "$TERM_SID" \
-                    --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
-                    --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
-                    --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
-                    --arg cmux_ckpt "${CMUX_FRESH_CHECKPOINT:-}" \
-                    --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0, skip_permissions: true} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end | if $cmux_ckpt != "" then .cmux_checkpoint = $cmux_ckpt else . end' \
-                    > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
-            else
-                jq -n \
-                    --arg sid "$SESSION_ID" \
-                    --arg status "starting" \
-                    --arg project "$PROJECT" \
-                    --arg cwd "${CWD:-}" \
-                    --arg terminal "$TERM_APP" \
-                    --arg term_sid "$TERM_SID" \
-                    --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
-                    --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
-                    --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
-                    --arg cmux_ckpt "${CMUX_FRESH_CHECKPOINT:-}" \
-                    --arg now "$NOW" \
-                    '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end | if $cmux_ckpt != "" then .cmux_checkpoint = $cmux_ckpt else . end' \
-                    > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
-            fi
+            jq -n \
+                --arg sid "$SESSION_ID" \
+                --arg status "starting" \
+                --arg project "$PROJECT" \
+                --arg cwd "${CWD:-}" \
+                --arg terminal "$TERM_APP" \
+                --arg term_sid "$TERM_SID" \
+                --arg ghostty_id "$GHOSTTY_RESOLVED_UUID" \
+                --arg cmux_sid "${CMUX_FRESH_SURFACE:-}" \
+                --arg cmux_wid "${CMUX_FRESH_WORKSPACE:-}" \
+                --arg cmux_ckpt "${CMUX_FRESH_CHECKPOINT:-}" \
+                --argjson skip "$([ "$SKIP_PERMS" = "true" ] && echo true || echo false)" \
+                --argjson headless "$([ "$HEADLESS" = "true" ] && echo true || echo false)" \
+                --arg now "$NOW" \
+                '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end | if $cmux_ckpt != "" then .cmux_checkpoint = $cmux_ckpt else . end | if $skip then .skip_permissions = true else . end | if $headless then .is_headless = true else . end' \
+                > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         fi
         ;;
 

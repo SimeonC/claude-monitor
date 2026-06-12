@@ -34,6 +34,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
     public var context_pct: Int?
     public var model: String?
     public var skip_permissions: Bool?
+    public var is_headless: Bool?
     public var permission_mode: String?
     /// Ghostty terminal UUID stored directly at session start (avoids tty_map indirection).
     public var ghostty_terminal_id: String?
@@ -54,8 +55,8 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
     public enum CodingKeys: String, CodingKey {
         case session_id, status, project, cwd, terminal, terminal_session_id,
             started_at, updated_at, last_prompt, agent_count, parent_session_id, context_pct,
-            model, skip_permissions, permission_mode, ghostty_terminal_id, cmux_surface_id,
-            cmux_workspace_id, cmux_checkpoint, merged_session_ids, custom_title
+            model, skip_permissions, is_headless, permission_mode, ghostty_terminal_id,
+            cmux_surface_id, cmux_workspace_id, cmux_checkpoint, merged_session_ids, custom_title
     }
 
     public init(
@@ -64,10 +65,10 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         started_at: String, updated_at: String, last_prompt: String,
         agent_count: Int = 0, parent_session_id: String? = nil,
         context_pct: Int? = nil, model: String? = nil, skip_permissions: Bool? = nil,
-        permission_mode: String? = nil, ghostty_terminal_id: String? = nil,
-        cmux_surface_id: String? = nil, cmux_workspace_id: String? = nil,
-        cmux_checkpoint: String? = nil, merged_session_ids: [String]? = nil,
-        custom_title: String? = nil
+        is_headless: Bool? = nil, permission_mode: String? = nil,
+        ghostty_terminal_id: String? = nil, cmux_surface_id: String? = nil,
+        cmux_workspace_id: String? = nil, cmux_checkpoint: String? = nil,
+        merged_session_ids: [String]? = nil, custom_title: String? = nil
     ) {
         self.session_id = session_id
         self.status = status
@@ -83,6 +84,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         self.context_pct = context_pct
         self.model = model
         self.skip_permissions = skip_permissions
+        self.is_headless = is_headless
         self.permission_mode = permission_mode
         self.ghostty_terminal_id = ghostty_terminal_id
         self.cmux_surface_id = cmux_surface_id
@@ -108,6 +110,7 @@ public struct SessionInfo: Codable, Identifiable, Equatable {
         context_pct = try? c.decode(Int.self, forKey: .context_pct)
         model = try? c.decode(String.self, forKey: .model)
         skip_permissions = try? c.decode(Bool.self, forKey: .skip_permissions)
+        is_headless = try? c.decode(Bool.self, forKey: .is_headless)
         permission_mode = try? c.decode(String.self, forKey: .permission_mode)
         ghostty_terminal_id = try? c.decode(String.self, forKey: .ghostty_terminal_id)
         cmux_surface_id = try? c.decode(String.self, forKey: .cmux_surface_id)

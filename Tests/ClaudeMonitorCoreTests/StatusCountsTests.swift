@@ -78,4 +78,44 @@ final class StatusCountsTests: XCTestCase {
         XCTAssertEqual(counts.total, 2)
         XCTAssertEqual(counts.attention, 1)
     }
+
+    private func makeHeadlessSession(status: String) -> SessionInfo {
+        SessionInfo(
+            session_id: UUID().uuidString,
+            status: status,
+            project: "proj",
+            cwd: "/proj",
+            terminal: "",
+            terminal_session_id: "",
+            started_at: fmt.string(from: Date()),
+            updated_at: fmt.string(from: Date()),
+            last_prompt: "",
+            is_headless: true
+        )
+    }
+
+    func testHeadlessExcludedFromInteractiveCounts() {
+        let sessions = [
+            makeSession(status: "working"),
+            makeHeadlessSession(status: "working"),
+        ]
+        let counts = StatusCounts(sessions)
+        XCTAssertEqual(counts.working, 1)
+        XCTAssertEqual(counts.headless, 1)
+        XCTAssertEqual(counts.total, 2)
+    }
+
+    func testHeadlessCountedSeparately() {
+        let sessions = [
+            makeHeadlessSession(status: "idle"),
+            makeHeadlessSession(status: "working"),
+            makeSession(status: "attention"),
+        ]
+        let counts = StatusCounts(sessions)
+        XCTAssertEqual(counts.headless, 2)
+        XCTAssertEqual(counts.attention, 1)
+        XCTAssertEqual(counts.idle, 0)
+        XCTAssertEqual(counts.working, 0)
+        XCTAssertEqual(counts.total, 3)
+    }
 }
