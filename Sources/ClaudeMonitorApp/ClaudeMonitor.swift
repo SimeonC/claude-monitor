@@ -1588,6 +1588,51 @@ struct SessionRowView: View, Equatable {
         return max(teamCount, agentCount)
     }
 
+    // A team/agents session shows a simple person glyph (no count); otherwise the mode
+    // icon. Single compact swatch either way — keeps the leading column narrow.
+    private var iconSymbol: String {
+        if hasTeam || badgeCount > 0 { return hasTeam ? "person.3.fill" : "person.2.fill" }
+        return session.modeIcon
+    }
+
+    @ViewBuilder
+    private var leadingIcon: some View {
+        Image(systemName: iconSymbol)
+            .font(.system(size: 10))
+            .foregroundColor(session.statusColor)
+            .frame(width: 16, height: 16)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(isDanger ? Color.red.opacity(0.3) : session.statusColor.opacity(0.15))
+            )
+            .overlay(
+                isDanger
+                    ? RoundedRectangle(cornerRadius: 4).stroke(Color.red.opacity(0.5), lineWidth: 1)
+                    : nil
+            )
+            .scaleEffect(badgeScale)
+            .shadow(color: session.status == "working" ? session.statusColor.opacity(0.6) : .clear, radius: 4)
+            .onAppear {
+                if session.status == "working" {
+                    withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                        badgeScale = 1.1
+                    }
+                }
+            }
+            .onChange(of: session.status) { _, newValue in
+                if newValue == "working" {
+                    withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                        badgeScale = 1.1
+                    }
+                } else {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        badgeScale = 1.0
+                    }
+                }
+            }
+            .help(session.modeLabel ?? (isDanger ? "Bypass permissions (--dangerously-skip-permissions)" : ""))
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             RoundedRectangle(cornerRadius: 1)
@@ -1596,99 +1641,26 @@ struct SessionRowView: View, Equatable {
                 .padding(.vertical, 4)
                 .animation(.easeInOut(duration: 0.2), value: row.isActive)
 
-            Spacer().frame(width: 6)
+            Spacer().frame(width: 5)
 
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    if badgeCount > 0 || hasTeam {
-                        HStack(spacing: 3) {
-                            Image(systemName: hasTeam ? "person.3.fill" : "person.2.fill")
-                                .font(.system(size: 8))
-                            if badgeCount > 0 {
-                                Text("\(badgeCount)")
-                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            }
-                        }
-                        .foregroundColor(session.statusColor)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(isDanger ? Color.red.opacity(0.3) : session.statusColor.opacity(0.2))
-                        )
-                        .overlay(
-                            isDanger ? Capsule().stroke(Color.red.opacity(0.5), lineWidth: 1) : nil
-                        )
-                        .scaleEffect(badgeScale)
-                        .shadow(color: session.status == "working" ? session.statusColor.opacity(0.6) : .clear, radius: 4)
-                        .onAppear {
-                            if session.status == "working" {
-                                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
-                                    badgeScale = 1.1
-                                }
-                            }
-                        }
-                        .onChange(of: session.status) { _, newValue in
-                            if newValue == "working" {
-                                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
-                                    badgeScale = 1.1
-                                }
-                            } else {
-                                withAnimation(.easeInOut(duration: 0.3)) {
-                                    badgeScale = 1.0
-                                }
-                            }
-                        }
-                        .fixedSize()
-                        .offset(y: 1)
-                    } else {
-                        Image(systemName: session.modeIcon)
-                            .font(.system(size: 9))
-                            .foregroundColor(session.statusColor)
-                            .shadow(color: session.statusColor.opacity(0.6), radius: session.status == "working" ? 4 : 0)
-                            .frame(width: 8, height: 8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 3)
-                                    .fill(isDanger ? Color.red.opacity(0.3) : session.statusColor.opacity(0.15))
-                                    .frame(width: 16, height: 16)
-                            )
-                            .overlay(
-                                isDanger
-                                    ? RoundedRectangle(cornerRadius: 3)
-                                        .stroke(Color.red.opacity(0.5), lineWidth: 1)
-                                        .frame(width: 16, height: 16)
-                                    : nil
-                            )
-                            .help(session.modeLabel ?? (isDanger ? "Bypass permissions (--dangerously-skip-permissions)" : ""))
-                            .offset(y: 1)
-                    }
+            // Leading icon — nudged down to align with the title line
+            leadingIcon
+                .frame(width: 16, height: 16)
+                .padding(.top, 4)
 
+            Spacer().frame(width: 7)
+
+            VStack(alignment: .leading, spacing: 2) {
+                // Line 1: title + pct%
+                HStack(spacing: 4) {
                     Text(session.custom_title ?? session.project)
                         .font(.system(size: 13, weight: .semibold, design: .default))
                         .foregroundColor(session.isStale ? .gray : .white)
-                        .lineLimit(nil)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                         .layoutPriority(1)
 
-                    if row.displayName != session.project {
-                        Text(row.displayName)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.35))
-                            .lineLimit(1)
-                    }
-
                     Spacer(minLength: 4)
-
-                    Text(session.displayStatus)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(session.statusColor.opacity(session.isStale ? 0.6 : 1.0))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(session.statusColor.opacity(session.isStale ? 0.08 : 0.2))
-                        )
-                        .fixedSize()
 
                     if let pct = session.context_pct {
                         Text("\(pct)%")
@@ -1699,17 +1671,15 @@ struct SessionRowView: View, Equatable {
                             .background(Capsule().fill(session.contextPctColor.opacity(0.15)))
                             .fixedSize()
                     }
-
                 }
 
-                HStack(spacing: 6) {
-                    if !session.last_prompt.isEmpty {
-                        Text(session.last_prompt)
-                            .font(.system(size: 11))
-                            .foregroundColor(.white.opacity(0.55))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
+                // Line 2: CWD (head-truncated) + elapsed + model
+                HStack(spacing: 4) {
+                    Text(session.cwd)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.35))
+                        .lineLimit(1)
+                        .truncationMode(.head)
 
                     Spacer(minLength: 4)
 
@@ -1725,12 +1695,20 @@ struct SessionRowView: View, Equatable {
                             .fixedSize()
                     }
                 }
+
+                // Line 3: description
+                if !session.last_prompt.isEmpty {
+                    Text(session.last_prompt)
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.55))
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                }
             }
         }
-        .padding(.leading, 6)
+        .padding(.leading, 5)
         .padding(.trailing, 12)
-        .padding(.top, 0)
-        .padding(.bottom, 8)
+        .padding(.vertical, 8)
         .onHover { isHovered = $0 }
     }
 }
@@ -1961,11 +1939,6 @@ struct HeaderBar: View {
                     .fixedSize()
                 }
 
-                Text("\(sessions.count)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.4))
-                    .fixedSize()
-
                 // Pin button — keeps panel expanded after mouse-out
                 Button {
                     hover.isPinned.toggle()
@@ -2010,9 +1983,6 @@ struct CompactSummaryView: View {
                     .font(.system(size: 18, weight: .semibold, design: .monospaced))
                     .foregroundColor(.doneGreen)
             }
-            Text("\(counts.total)")
-                .font(.system(size: 14, design: .monospaced))
-                .foregroundColor(.white.opacity(0.4))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -2062,6 +2032,12 @@ struct MonitorContentView: View {
 
     private var isExpanded: Bool { hover.isExpanded }
     private var sessions: [SessionInfo] { vm.snapshot.rows.map { $0.session } }
+    /// Collapsed pill turns orange when ≥1 session needs attention.
+    private var showWaitingBorder: Bool { !isExpanded && StatusCounts(sessions).attention > 0 }
+
+    static let baseBG = NSColor(red: 0.129, green: 0.016, blue: 0.314, alpha: 1.0)
+    /// Orange muted toward the base background so the attention pill isn't blindingly bright.
+    static let attentionBG = NSColor.systemOrange.blended(withFraction: 0.85, of: baseBG) ?? .systemOrange
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2135,14 +2111,16 @@ struct MonitorContentView: View {
         }
         .frame(width: isExpanded ? 420 : nil)
         .fixedSize(horizontal: !isExpanded, vertical: true)
-        .animation(.easeInOut(duration: 0.18), value: isExpanded)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(nsColor: NSColor(red: 0.129, green: 0.016, blue: 0.314, alpha: 1.0)))
+                .fill(Color(nsColor: showWaitingBorder ? Self.attentionBG : Self.baseBG))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+                .strokeBorder(
+                    showWaitingBorder ? Color.orange : Color.white.opacity(0.1),
+                    lineWidth: showWaitingBorder ? 2 : 0.5
+                )
         )
     }
 }
@@ -2676,8 +2654,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var vm: MonitorViewModel!
     var engine: WatcherEngine!
     var activationShim: WorkspaceActivationShim!
-    var sizeObserver: AnyCancellable?
     var activeSessionObserver: AnyCancellable?
+    /// The panel frame as last positioned by us or the user (drag), used as a stable
+    /// anchor reference. The hosting view auto-resizes the window top-left anchored, so
+    /// only the top-left edge survives — settledFrame remembers the other edges.
+    var settledFrame: NSRect?
+    /// Guards against our re-anchoring setFrame re-triggering the resize/move observers.
+    var isReanchoring = false
     var shortcutManager: ShortcutManager!
     var currentSessionId: String?
     let panelHover = PanelHoverState()
@@ -2757,40 +2740,67 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         panel.restorePosition()
         panel.orderFrontRegardless()
+        settledFrame = panel.frame
 
-        // Auto-resize panel to fit content; preserve the correct edge based on dock position
-        sizeObserver = hostingView.publisher(for: \.fittingSize)
-            .debounce(for: .milliseconds(50), scheduler: RunLoop.main)
-            .sink { [weak self] newSize in
-                guard let self = self, let panel = self.panel else { return }
-                let origin = panel.frame.origin
-                let topY = origin.y + panel.frame.height
-                let screen = NSScreen.main ?? NSScreen.screens.first
-                let screenMidX = screen?.visibleFrame.midX ?? 0
-                let panelMidX = origin.x + panel.frame.width / 2
-                let newX: CGFloat
-                if panelMidX > screenMidX {
-                    // Right half of screen: preserve right edge, grow leftward
-                    newX = (origin.x + panel.frame.width) - newSize.width
-                } else {
-                    // Left half of screen: preserve left edge, grow rightward
-                    newX = origin.x
-                }
-                let newOrigin = NSPoint(x: newX, y: topY - newSize.height)
-                panel.setFrame(
-                    NSRect(origin: newOrigin, size: newSize),
-                    display: true,
-                    animate: false
-                )
+        // The hosting view auto-resizes the window when SwiftUI content changes, anchored
+        // top-left (so it grows down+right). fittingSize KVO doesn't fire reliably, so we
+        // react to the window's own didResize and re-anchor based on which cell of a 3×3
+        // screen grid the panel sits in. We anchor against the last settled frame
+        // (collapsed/dragged position) because the auto-resize only preserves the top-left.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self, let panel = self.panel, !self.isReanchoring else { return }
+            let newSize = panel.frame.size
+            guard newSize.width > 1, newSize.height > 1 else { return }
+            let anchor = self.settledFrame ?? panel.frame
+            let vf = (NSScreen.screens.first(where: { $0.frame.contains(anchor.origin) })
+                ?? NSScreen.main
+                ?? NSScreen.screens.first)?.visibleFrame ?? .zero
+            // Horizontal: left third keeps left edge (grow right), center keeps center
+            // (grow both ways), right third keeps right edge (grow left).
+            let newX: CGFloat
+            if anchor.midX < vf.minX + vf.width / 3 {
+                newX = anchor.minX
+            } else if anchor.midX > vf.minX + vf.width * 2 / 3 {
+                newX = anchor.maxX - newSize.width
+            } else {
+                newX = anchor.midX - newSize.width / 2
             }
+            // Vertical: top third keeps top edge (grow down), center keeps center,
+            // bottom third keeps bottom edge (grow up). (origin.y is the bottom edge.)
+            let newY: CGFloat
+            if anchor.midY > vf.minY + vf.height * 2 / 3 {
+                newY = anchor.maxY - newSize.height
+            } else if anchor.midY < vf.minY + vf.height / 3 {
+                newY = anchor.minY
+            } else {
+                newY = anchor.midY - newSize.height / 2
+            }
+            let frame = NSRect(origin: NSPoint(x: newX, y: newY), size: newSize)
+            if frame != panel.frame {
+                self.isReanchoring = true
+                panel.setFrame(frame, display: true, animate: false)
+                self.isReanchoring = false
+            }
+            self.settledFrame = frame
+        }
 
-        // Save position on drag
+        // Save position on user drag (and refresh the anchor reference). Only treat it
+        // as a real drag when the mouse button is held — programmatic resizes also post
+        // didMove and would otherwise corrupt the anchor.
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
             object: panel,
             queue: .main
         ) { [weak self] _ in
-            self?.panel.savePosition()
+            guard let self = self, let panel = self.panel, !self.isReanchoring else { return }
+            if NSEvent.pressedMouseButtons & 0x1 != 0 {
+                self.settledFrame = panel.frame
+                panel.savePosition()
+            }
         }
     }
 }
