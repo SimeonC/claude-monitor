@@ -37,6 +37,7 @@ A tiny always-on-top panel you can drag anywhere on your screen. It shows every 
 - **Right-click context menu** to delete sessions or relink Ghostty tabs
 - **Always-on-top** dark glass panel, visible on all Spaces, no dock icon
 - **Auto-discovery** via JSONL scanning — sessions appear without manual refresh
+- **Headless session support** — automated/non-interactive runs are dimmed, sorted to the bottom, and counted separately so they don't clutter the interactive list
 
 ## Install
 
@@ -169,6 +170,32 @@ If you use [cmux](https://cmux.dev), two extra steps are needed for click-to-swi
 ## How It Works
 
 Claude Code hooks fire on session events → `monitor.sh` writes session JSON to `~/.claude-monitor/sessions/` → the Swift app detects changes via FSEvents and updates the floating panel. Session files are never deleted — status transitions replace destructive removal to prevent race conditions in concurrent hooks.
+
+## Headless Sessions
+
+Automated Claude runs — cron jobs, CI pipelines, scripts, `claude -p` one-shots — show up in the monitor just like interactive sessions, which inflates your working/idle counts and clutters the list with rows you can't usefully click on.
+
+The monitor flags these as **headless**: they render as dimmed compact rows at the bottom of the list, their count appears in a separate pill (⚙ N) so it never mixes with your working/idle/attention counts, and clicking them does nothing.
+
+### Auto-detection
+
+Any session launched with `--print` / `-p` is detected automatically — the monitor walks the process tree to the `claude` ancestor and checks its arguments at session start.
+
+### Opt-in via environment variable
+
+For scripts that don't use `-p`, set `CLAUDE_HEADLESS` to any non-empty value before running Claude:
+
+```bash
+CLAUDE_HEADLESS=1 claude --dangerously-skip-permissions "run the test suite and report results"
+```
+
+Or export it for the duration of a shell session:
+
+```bash
+export CLAUDE_HEADLESS=1
+```
+
+Any session started with `CLAUDE_HEADLESS` set will appear as headless in the monitor regardless of other flags.
 
 ## Credits
 
