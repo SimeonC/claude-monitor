@@ -2047,19 +2047,28 @@ struct CompactSummaryView: View {
     var body: some View {
         HStack(spacing: 8) {
             if counts.attention > 0 {
-                Text("\(counts.attention)")
-                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.orange)
+                HStack(spacing: 4) {
+                    Circle().fill(Color.orange).frame(width: 8, height: 8)
+                    Text("\(counts.attention)")
+                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.orange)
+                }
             }
             if counts.working > 0 {
-                Text("\(counts.working)")
-                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.workingBlue)
+                HStack(spacing: 4) {
+                    Circle().fill(Color.workingBlue).frame(width: 8, height: 8)
+                    Text("\(counts.working)")
+                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.workingBlue)
+                }
             }
             if counts.idle > 0 || (counts.attention == 0 && counts.working == 0 && counts.headless == 0) {
-                Text("\(counts.idle)")
-                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.doneGreen)
+                HStack(spacing: 4) {
+                    Circle().fill(Color.doneGreen).frame(width: 8, height: 8)
+                    Text("\(counts.idle)")
+                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.doneGreen)
+                }
             }
             if counts.headless > 0 && counts.attention == 0 && counts.working == 0 && counts.idle == 0 {
                 HStack(spacing: 3) {
