@@ -1666,8 +1666,8 @@ struct SessionRowView: View, Equatable {
                     Text(session.custom_title ?? session.project)
                         .font(.system(size: 13, weight: .semibold, design: .default))
                         .foregroundColor(session.isStale ? .gray : .white)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
                         .layoutPriority(1)
 
                     if row.displayName != session.project {
@@ -1915,10 +1915,9 @@ struct HeaderBar: View {
     let sessions: [SessionInfo]
     var sessionReader: SessionReader?
     @ObservedObject var shortcutManager: ShortcutManager
+    @ObservedObject var hover: PanelHoverState
 
-    var attentionCount: Int { sessions.filter { $0.status == "attention" }.count }
-    var workingCount: Int { sessions.filter { $0.status == "working" }.count }
-    var idleCount: Int { sessions.filter { $0.status == "idle" }.count }
+    private var counts: StatusCounts { StatusCounts(sessions) }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1934,28 +1933,28 @@ struct HeaderBar: View {
             Spacer()
 
             HStack(spacing: 12) {
-                if attentionCount > 0 {
+                if counts.attention > 0 {
                     HStack(spacing: 3) {
                         Circle().fill(Color.orange).frame(width: 6, height: 6)
-                        Text("\(attentionCount)")
+                        Text("\(counts.attention)")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.orange)
                     }
                     .fixedSize()
                 }
-                if workingCount > 0 {
+                if counts.working > 0 {
                     HStack(spacing: 3) {
                         Circle().fill(Color.workingBlue).frame(width: 6, height: 6)
-                        Text("\(workingCount)")
+                        Text("\(counts.working)")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.workingBlue)
                     }
                     .fixedSize()
                 }
-                if idleCount > 0 {
+                if counts.idle > 0 {
                     HStack(spacing: 3) {
                         Circle().fill(Color.doneGreen).frame(width: 6, height: 6)
-                        Text("\(idleCount)")
+                        Text("\(counts.idle)")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundColor(.doneGreen)
                     }
@@ -1967,6 +1966,18 @@ struct HeaderBar: View {
                     .foregroundColor(.white.opacity(0.4))
                     .fixedSize()
 
+                // Pin button — keeps panel expanded after mouse-out
+                Button {
+                    hover.isPinned.toggle()
+                } label: {
+                    Image(systemName: hover.isPinned ? "pin.fill" : "pin")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(hover.isPinned ? .white.opacity(0.9) : .white.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .fixedSize()
+
                 CogButton(shortcutManager: shortcutManager, sessionReader: sessionReader)
                     .fixedSize()
             }
@@ -1974,6 +1985,37 @@ struct HeaderBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+}
+
+// MARK: - Compact Summary View
+
+struct CompactSummaryView: View {
+    let counts: StatusCounts
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if counts.attention > 0 {
+                Text("\(counts.attention)")
+                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.orange)
+            }
+            if counts.working > 0 {
+                Text("\(counts.working)")
+                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.workingBlue)
+            }
+            if counts.idle > 0 || (counts.attention == 0 && counts.working == 0) {
+                Text("\(counts.idle)")
+                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.doneGreen)
+            }
+            Text("\(counts.total)")
+                .font(.system(size: 14, design: .monospaced))
+                .foregroundColor(.white.opacity(0.4))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 }
 
@@ -2016,76 +2058,84 @@ struct MonitorContentView: View {
     @ObservedObject var vm: MonitorViewModel
     @ObservedObject var reader: SessionReader   // kept for ttyMap + action delegation
     @ObservedObject var shortcutManager: ShortcutManager
-    @State private var isExpanded = true
+    @ObservedObject var hover: PanelHoverState
+
+    private var isExpanded: Bool { hover.isExpanded }
+    private var sessions: [SessionInfo] { vm.snapshot.rows.map { $0.session } }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header — always visible, drag to move
-            HeaderBar(
-                sessions: vm.snapshot.rows.map { $0.session }, sessionReader: reader,
-                shortcutManager: shortcutManager)
+            if isExpanded {
+                // Header — always visible when expanded, drag to move
+                HeaderBar(
+                    sessions: sessions, sessionReader: reader,
+                    shortcutManager: shortcutManager, hover: hover)
 
-            if let errorMsg = vm.focusError {
-                HStack(spacing: 6) {
-                    Text(errorMsg)
-                        .font(.system(size: 11))
-                        .foregroundColor(.white)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button(action: { vm.focusError = nil }) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(.white.opacity(0.8))
+                if let errorMsg = vm.focusError {
+                    HStack(spacing: 6) {
+                        Text(errorMsg)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button(action: { vm.focusError = nil }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.white.opacity(0.8))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.75))
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color.red.opacity(0.75))
-            }
 
-            if isExpanded && !vm.snapshot.rows.isEmpty {
-                Divider()
-                    .background(Color.white.opacity(0.1))
+                if !vm.snapshot.rows.isEmpty {
+                    Divider()
+                        .background(Color.white.opacity(0.1))
 
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(vm.snapshot.rows) { row in
-                            SessionRowView(row: row)
-                                .equatable()
-                                .overlay(
-                                    FirstMouseClickArea(
-                                        action: {
-                                            vm.focus(row.session, ttyMap: reader.ttyMap)
-                                        },
-                                        contextMenuBuilder: { event in
-                                            let menu = NSMenu()
-                                            if providerFor(name: row.session.terminal) != nil {
-                                                menu.addItem(ClosureMenuItem("Relink to Focused Tab") {
-                                                    vm.relink(row.session)
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(vm.snapshot.rows) { row in
+                                SessionRowView(row: row)
+                                    .equatable()
+                                    .overlay(
+                                        FirstMouseClickArea(
+                                            action: {
+                                                vm.focus(row.session, ttyMap: reader.ttyMap)
+                                            },
+                                            contextMenuBuilder: { event in
+                                                let menu = NSMenu()
+                                                if providerFor(name: row.session.terminal) != nil {
+                                                    menu.addItem(ClosureMenuItem("Relink to Focused Tab") {
+                                                        vm.relink(row.session)
+                                                    })
+                                                }
+                                                menu.addItem(ClosureMenuItem("Delete Session") {
+                                                    vm.delete(sessionId: row.session.session_id)
                                                 })
+                                                return menu
                                             }
-                                            menu.addItem(ClosureMenuItem("Delete Session") {
-                                                vm.delete(sessionId: row.session.session_id)
-                                            })
-                                            return menu
-                                        }
+                                        )
                                     )
-                                )
-                            if row.id != vm.snapshot.rows.last?.id {
-                                Divider()
-                                    .background(Color.white.opacity(0.05))
-                                    .padding(.horizontal, 12)
+                                if row.id != vm.snapshot.rows.last?.id {
+                                    Divider()
+                                        .background(Color.white.opacity(0.05))
+                                        .padding(.horizontal, 12)
+                                }
                             }
                         }
+                        .background(ScrollbarStyler())
                     }
-                    .background(ScrollbarStyler())
+                    .frame(maxHeight: 600)
                 }
-                .frame(maxHeight: 600)
+            } else {
+                CompactSummaryView(counts: StatusCounts(sessions))
             }
         }
-        .frame(width: 310)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: isExpanded ? 420 : nil)
+        .fixedSize(horizontal: !isExpanded, vertical: true)
+        .animation(.easeInOut(duration: 0.18), value: isExpanded)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(nsColor: NSColor(red: 0.129, green: 0.016, blue: 0.314, alpha: 1.0)))
@@ -2168,6 +2218,14 @@ struct VisualEffectView: NSViewRepresentable {
     }
 }
 
+// MARK: - Panel Hover State
+
+final class PanelHoverState: ObservableObject {
+    @Published var isHovering = false
+    @Published var isPinned = false
+    var isExpanded: Bool { isHovering || isPinned }
+}
+
 // MARK: - Floating Panel
 
 class FloatingPanel: NSPanel {
@@ -2208,7 +2266,30 @@ class FloatingPanel: NSPanel {
 // MARK: - Click-through Hosting View
 
 class ClickHostingView<Content: View>: NSHostingView<Content> {
+    var onHoverChange: ((Bool) -> Void)?
+    private var collapseTimer: Timer?
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        trackingAreas.forEach { removeTrackingArea($0) }
+        let opts: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeAlways, .inVisibleRect]
+        addTrackingArea(NSTrackingArea(rect: bounds, options: opts, owner: self, userInfo: nil))
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        collapseTimer?.invalidate()
+        collapseTimer = nil
+        onHoverChange?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        collapseTimer?.invalidate()
+        collapseTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self] _ in
+            self?.onHoverChange?(false)
+        }
+    }
 }
 
 // MARK: - First-Mouse Click Overlay (drag-safe)
@@ -2599,6 +2680,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var activeSessionObserver: AnyCancellable?
     var shortcutManager: ShortcutManager!
     var currentSessionId: String?
+    let panelHover = PanelHoverState()
 
     @MainActor func jumpToNextSession() {
         let sessions = vm.snapshot.rows.map { $0.session }
@@ -2662,26 +2744,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let hostingView = ClickHostingView(
             rootView: MonitorContentView(
-                vm: vm, reader: reader, shortcutManager: shortcutManager)
+                vm: vm, reader: reader, shortcutManager: shortcutManager, hover: panelHover)
         )
         hostingView.frame = NSRect(origin: .zero, size: NSSize(width: 280, height: 40))
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = .clear
+        hostingView.onHoverChange = { [weak self] hovering in
+            DispatchQueue.main.async { self?.panelHover.isHovering = hovering }
+        }
 
         panel.contentView = hostingView
 
         panel.restorePosition()
         panel.orderFrontRegardless()
 
-        // Auto-resize panel to fit content
+        // Auto-resize panel to fit content; preserve the correct edge based on dock position
         sizeObserver = hostingView.publisher(for: \.fittingSize)
             .debounce(for: .milliseconds(50), scheduler: RunLoop.main)
             .sink { [weak self] newSize in
                 guard let self = self, let panel = self.panel else { return }
                 let origin = panel.frame.origin
-                // Grow downward from top edge
                 let topY = origin.y + panel.frame.height
-                let newOrigin = NSPoint(x: origin.x, y: topY - newSize.height)
+                let screen = NSScreen.main ?? NSScreen.screens.first
+                let screenMidX = screen?.visibleFrame.midX ?? 0
+                let panelMidX = origin.x + panel.frame.width / 2
+                let newX: CGFloat
+                if panelMidX > screenMidX {
+                    // Right half of screen: preserve right edge, grow leftward
+                    newX = (origin.x + panel.frame.width) - newSize.width
+                } else {
+                    // Left half of screen: preserve left edge, grow rightward
+                    newX = origin.x
+                }
+                let newOrigin = NSPoint(x: newX, y: topY - newSize.height)
                 panel.setFrame(
                     NSRect(origin: newOrigin, size: newSize),
                     display: true,
