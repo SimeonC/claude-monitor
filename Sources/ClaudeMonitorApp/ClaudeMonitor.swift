@@ -2045,39 +2045,53 @@ struct CompactSummaryView: View {
     let counts: StatusCounts
 
     var body: some View {
-        HStack(spacing: 8) {
-            if counts.attention > 0 {
-                HStack(spacing: 4) {
-                    Circle().fill(Color.orange).frame(width: 8, height: 8)
-                    Text("\(counts.attention)")
-                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.orange)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if counts.attention > 0 {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.orange).frame(width: 8, height: 8)
+                        Text("\(counts.attention)")
+                            .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.orange)
+                    }
+                }
+                if counts.working > 0 {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.workingBlue).frame(width: 8, height: 8)
+                        Text("\(counts.working)")
+                            .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.workingBlue)
+                    }
+                }
+                if counts.idle > 0 || (counts.attention == 0 && counts.working == 0 && counts.headless == 0) {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.doneGreen).frame(width: 8, height: 8)
+                        Text("\(counts.idle)")
+                            .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.doneGreen)
+                    }
+                }
+                if counts.headless > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "gearshape.2.fill")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.4))
+                        Text("\(counts.headless)")
+                            .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.4))
+                    }
                 }
             }
-            if counts.working > 0 {
-                HStack(spacing: 4) {
-                    Circle().fill(Color.workingBlue).frame(width: 8, height: 8)
-                    Text("\(counts.working)")
-                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.workingBlue)
-                }
-            }
-            if counts.idle > 0 || (counts.attention == 0 && counts.working == 0 && counts.headless == 0) {
-                HStack(spacing: 4) {
-                    Circle().fill(Color.doneGreen).frame(width: 8, height: 8)
-                    Text("\(counts.idle)")
-                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.doneGreen)
-                }
-            }
-            if counts.headless > 0 && counts.attention == 0 && counts.working == 0 && counts.idle == 0 {
-                HStack(spacing: 3) {
-                    Image(systemName: "gearshape.2.fill")
-                        .font(.system(size: 13))
-                        .foregroundColor(.white.opacity(0.4))
-                    Text("\(counts.headless)")
-                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.4))
+            if !counts.workingContextPcts.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(Array(counts.workingContextPcts.enumerated()), id: \.offset) { _, pct in
+                        Text("\(pct)%")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(contextPctColor(pct))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(contextPctColor(pct).opacity(0.15)))
+                    }
                 }
             }
         }

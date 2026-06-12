@@ -8,6 +8,13 @@ extension Color {
     static let doneGreen = Color(red: 0.494, green: 0.980, blue: 0.392)  // #7EFA64
 }
 
+func contextPctColor(_ pct: Int?) -> Color {
+    guard let pct else { return .gray }
+    if pct >= 80 { return .orange }
+    if pct >= 50 { return .yellow }
+    return .doneGreen
+}
+
 // MARK: - SessionInfo SwiftUI Extensions
 
 extension SessionInfo {
@@ -22,10 +29,5 @@ extension SessionInfo {
         }
     }
 
-    var contextPctColor: Color {
-        guard let pct = context_pct else { return .gray }
-        if pct >= 80 { return .orange }
-        if pct >= 50 { return .yellow }
-        return .doneGreen
-    }
+    var contextPctColor: Color { ClaudeCodeMonitor.contextPctColor(context_pct) }
 }

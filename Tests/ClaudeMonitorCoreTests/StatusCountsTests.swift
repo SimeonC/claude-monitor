@@ -9,7 +9,7 @@ final class StatusCountsTests: XCTestCase {
         return f
     }()
 
-    private func makeSession(status: String) -> SessionInfo {
+    private func makeSession(status: String, contextPct: Int? = nil) -> SessionInfo {
         SessionInfo(
             session_id: UUID().uuidString,
             status: status,
@@ -19,7 +19,8 @@ final class StatusCountsTests: XCTestCase {
             terminal_session_id: "",
             started_at: fmt.string(from: Date()),
             updated_at: fmt.string(from: Date()),
-            last_prompt: ""
+            last_prompt: "",
+            context_pct: contextPct
         )
     }
 
@@ -79,7 +80,7 @@ final class StatusCountsTests: XCTestCase {
         XCTAssertEqual(counts.attention, 1)
     }
 
-    private func makeHeadlessSession(status: String) -> SessionInfo {
+    private func makeHeadlessSession(status: String, contextPct: Int? = nil) -> SessionInfo {
         SessionInfo(
             session_id: UUID().uuidString,
             status: status,
@@ -90,6 +91,7 @@ final class StatusCountsTests: XCTestCase {
             started_at: fmt.string(from: Date()),
             updated_at: fmt.string(from: Date()),
             last_prompt: "",
+            context_pct: contextPct,
             is_headless: true
         )
     }
@@ -117,5 +119,53 @@ final class StatusCountsTests: XCTestCase {
         XCTAssertEqual(counts.idle, 0)
         XCTAssertEqual(counts.working, 0)
         XCTAssertEqual(counts.total, 3)
+    }
+
+    // MARK: - workingContextPcts
+
+    func testWorkingContextPctsEmptyWhenNoSessions() {
+        XCTAssertEqual(StatusCounts([]).workingContextPcts, [])
+    }
+
+    func testWorkingContextPctsIncludesWorkingAtOrAboveThreshold() {
+        let sessions = [makeSession(status: "working", contextPct: 75)]
+        XCTAssertEqual(StatusCounts(sessions).workingContextPcts, [75])
+    }
+
+    func testWorkingContextPctsExcludesWorkingBelowThreshold() {
+        let sessions = [makeSession(status: "working", contextPct: 30)]
+        XCTAssertEqual(StatusCounts(sessions).workingContextPcts, [])
+    }
+
+    func testWorkingContextPctsExcludesNonWorkingEvenAboveThreshold() {
+        let sessions = [
+            makeSession(status: "idle", contextPct: 75),
+            makeSession(status: "attention", contextPct: 90),
+        ]
+        XCTAssertEqual(StatusCounts(sessions).workingContextPcts, [])
+    }
+
+    func testWorkingContextPctsExcludesHeadlessSessions() {
+        let sessions = [makeHeadlessSession(status: "working", contextPct: 80)]
+        XCTAssertEqual(StatusCounts(sessions).workingContextPcts, [])
+    }
+
+    func testWorkingContextPctsExcludesNilContextPct() {
+        let sessions = [makeSession(status: "working", contextPct: nil)]
+        XCTAssertEqual(StatusCounts(sessions).workingContextPcts, [])
+    }
+
+    func testWorkingContextPctsSortedDescending() {
+        let sessions = [
+            makeSession(status: "working", contextPct: 60),
+            makeSession(status: "working", contextPct: 90),
+            makeSession(status: "working", contextPct: 75),
+        ]
+        XCTAssertEqual(StatusCounts(sessions).workingContextPcts, [90, 75, 60])
+    }
+
+    func testWorkingContextPctsAtExactThreshold() {
+        let sessions = [makeSession(status: "working", contextPct: 50)]
+        XCTAssertEqual(StatusCounts(sessions).workingContextPcts, [50])
     }
 }
