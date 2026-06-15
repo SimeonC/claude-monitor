@@ -1273,7 +1273,9 @@ class SessionReader: ObservableObject {
             let tid1 = b.terminal_session_id
             if let n0 = Int(tid0), let n1 = Int(tid1) { return n0 < n1 }
             if tid0 != tid1 { return tid0 < tid1 }
-            return a.cwd.localizedCaseInsensitiveCompare(b.cwd) == .orderedAscending
+            let cwdCmp = a.cwd.localizedCaseInsensitiveCompare(b.cwd)
+            if cwdCmp != .orderedSame { return cwdCmp == .orderedAscending }
+            return a.session_id < b.session_id
         }
 
         var aggregated = aggregateSessions(interactiveLoaded, referenceDate: Date())
