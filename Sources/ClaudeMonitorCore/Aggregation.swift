@@ -24,8 +24,13 @@ public func aggregateSessions(
 ) -> [SessionInfo] {
     var grouped: [String: [SessionInfo]] = [:]
     for s in sessions {
-        // Sessions with a terminal_session_id get a unique key so they're never collapsed
-        if !s.terminal_session_id.isEmpty {
+        // Headless `claude --print` agents are spawned inside an existing CMUX panel, so they
+        // share the parent's terminal_session_id (and often cwd). Key each by its own
+        // session_id so concurrent headless invokes never collapse into one row.
+        if s.is_headless == true {
+            grouped["headless:\(s.session_id)", default: []].append(s)
+        } else if !s.terminal_session_id.isEmpty {
+            // Sessions with a terminal_session_id get a unique key so they're never collapsed
             grouped["tid:\(s.terminal_session_id)", default: []].append(s)
         } else {
             grouped["\(s.project)|\(s.cwd)", default: []].append(s)
@@ -33,11 +38,11 @@ public func aggregateSessions(
     }
 
     // Merge groups that share the exact same CWD (different project names, same directory).
-    // Skip tid:-keyed groups — those must stay separate.
+    // Skip tid:- and headless:-keyed groups — those must stay separate.
     var didMerge = true
     while didMerge {
         didMerge = false
-        let keys = Array(grouped.keys).filter { !$0.hasPrefix("tid:") }
+        let keys = Array(grouped.keys).filter { !$0.hasPrefix("tid:") && !$0.hasPrefix("headless:") }
         outer: for i in 0..<keys.count {
             for j in (i + 1)..<keys.count {
                 let a = keys[i]

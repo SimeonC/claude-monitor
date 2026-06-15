@@ -377,6 +377,34 @@ final class AggregationTests: XCTestCase {
         XCTAssertNil(result[0].permission_mode)
     }
 
+    // MARK: - Headless sessions never aggregate
+
+    func testHeadlessSessionsSharingTerminalSessionIdNotAggregated() {
+        // Headless `claude --print` agents spawned in the same CMUX panel inherit the
+        // same terminal_session_id. They must each render as their own row.
+        var a = makeSession(id: "a", status: "working", project: "proj", cwd: "/proj",
+            terminalSessionId: "/dev/ttys013")
+        a.is_headless = true
+        var b = makeSession(id: "b", status: "working", project: "proj", cwd: "/proj",
+            terminalSessionId: "/dev/ttys013")
+        b.is_headless = true
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 2,
+            "Headless sessions sharing a terminal_session_id must not be aggregated")
+    }
+
+    func testHeadlessSessionsSharingCwdNotMerged() {
+        // Different project names, same cwd, no terminal_session_id — interactive sessions
+        // would merge by cwd, but headless ones must stay separate.
+        var a = makeSession(id: "a", status: "working", project: "proj-a", cwd: "/shared/dir")
+        a.is_headless = true
+        var b = makeSession(id: "b", status: "working", project: "proj-b", cwd: "/shared/dir")
+        b.is_headless = true
+        let result = aggregateSessions([a, b], referenceDate: referenceDate)
+        XCTAssertEqual(result.count, 2,
+            "Headless sessions sharing a cwd must not be merged")
+    }
+
     func testMixedTerminalSessionIdAndEmptyNotMerged() {
         let a = makeSession(id: "a", status: "idle", project: "proj", cwd: "/proj",
             terminalSessionId: "/dev/ttys007")
