@@ -1528,6 +1528,16 @@ func switchToSession(_ session: SessionInfo, ttyMap: [String: String] = [:], onE
     }
 }
 
+/// A session can be jumped to if it owns a focusable surface. Interactive sessions
+/// always do (with CWD fallback). Headless agents run inside a parent cmux panel —
+/// jumpable only when that panel's surface/checkpoint was captured.
+func canFocus(_ s: SessionInfo) -> Bool {
+    if s.is_headless == true {
+        return (s.cmux_checkpoint?.isEmpty == false) || (s.cmux_surface_id?.isEmpty == false)
+    }
+    return true
+}
+
 func switchByTerminalCwd(cwd: String) {
     // Fallback: find any running terminal and activate it
     for provider in terminalProviders {
@@ -1588,6 +1598,7 @@ struct SessionRowView: View, Equatable {
     private var isDanger: Bool { session.skip_permissions == true }
     private var isHeadless: Bool { session.is_headless == true }
     private var hasTeam: Bool { row.team != nil }
+    private var canFocusRow: Bool { canFocus(session) }
 
     private var badgeCount: Int {
         let teamCount = row.team?.activeAgentCount ?? 0
@@ -1695,7 +1706,14 @@ struct SessionRowView: View, Equatable {
         .padding(.leading, 5)
         .padding(.trailing, 12)
         .padding(.vertical, 6)
-        .opacity(0.45)
+        .opacity(canFocusRow && isHovered ? 0.85 : 0.45)
+        .onHover { hovering in
+            isHovered = hovering
+            if canFocusRow {
+                if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+        }
+        .help(canFocusRow ? "Jump to session tab" : "")
     }
 
     var body: some View {
@@ -2192,9 +2210,9 @@ struct MonitorContentView: View {
                                     .equatable()
                                     .overlay(
                                         FirstMouseClickArea(
-                                            action: row.session.is_headless == true ? {} : {
+                                            action: canFocus(row.session) ? {
                                                 vm.focus(row.session, ttyMap: reader.ttyMap)
-                                            },
+                                            } : {},
                                             contextMenuBuilder: { event in
                                                 let menu = NSMenu()
                                                 if row.session.is_headless != true,
@@ -2783,7 +2801,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let panelHover = PanelHoverState()
 
     @MainActor func jumpToNextSession() {
-        let sessions = vm.snapshot.rows.map { $0.session }
+        let sessions = vm.snapshot.rows.map { $0.session }.filter { canFocus($0) }
         guard !sessions.isEmpty else { return }
 
         let attentionSessions = sessions.filter { $0.status == "attention" }
