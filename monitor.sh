@@ -700,6 +700,15 @@ cleanup_same_terminal() {
     done
 }
 
+# Helper: extract the latest custom-title from the tail of the transcript.
+# Reads only the last 64KB so it stays cheap on large files.
+latest_custom_title() {
+    [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ] || return 0
+    tail -c 65536 "$TRANSCRIPT_PATH" 2>/dev/null \
+      | grep -F '"type":"custom-title"' | tail -n1 \
+      | jq -r '.customTitle // empty' 2>/dev/null
+}
+
 # Helper: any non-dead status → working when user/tool activity happens.
 # PreToolUse fires after the user approves a permission prompt, so this clears attention.
 set_working() {
@@ -745,6 +754,7 @@ case "$EVENT" in
         else
             HEADLESS=false
         fi
+        SESSION_TITLE=$(echo "$INPUT" | jq -r '.session_title // empty' 2>/dev/null || true)
         if [ -f "$SESSION_FILE" ] && [ -s "$SESSION_FILE" ]; then
             # Session file exists — backfill terminal and reboot if dead
             backfill_terminal
@@ -755,6 +765,9 @@ case "$EVENT" in
                     --arg updated "$NOW" \
                     '.status = $status | .updated_at = $updated'
             fi
+            # Seed custom_title from session_title (hook provides it; no transcript read needed)
+            [ -n "$SESSION_TITLE" ] && \
+                update_json_file "$SESSION_FILE" --arg ct "$SESSION_TITLE" '.custom_title = $ct'
             # Persist ghostty_terminal_id if resolved
             if [ -n "$GHOSTTY_RESOLVED_UUID" ]; then
                 update_json_file "$SESSION_FILE" --arg gid "$GHOSTTY_RESOLVED_UUID" \
@@ -795,8 +808,9 @@ case "$EVENT" in
                 --arg cmux_ckpt "${CMUX_FRESH_CHECKPOINT:-}" \
                 --argjson skip "$([ "$SKIP_PERMS" = "true" ] && echo true || echo false)" \
                 --argjson headless "$([ "$HEADLESS" = "true" ] && echo true || echo false)" \
+                --arg ct "${SESSION_TITLE:-}" \
                 --arg now "$NOW" \
-                '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end | if $cmux_ckpt != "" then .cmux_checkpoint = $cmux_ckpt else . end | if $skip then .skip_permissions = true else . end | if $headless then .is_headless = true else . end' \
+                '{session_id: $sid, status: $status, project: $project, cwd: $cwd, terminal: $terminal, terminal_session_id: $term_sid, started_at: $now, updated_at: $now, last_prompt: "", agent_count: 0} | if $ghostty_id != "" then .ghostty_terminal_id = $ghostty_id else . end | if $cmux_sid != "" then .cmux_surface_id = $cmux_sid else . end | if $cmux_wid != "" then .cmux_workspace_id = $cmux_wid else . end | if $cmux_ckpt != "" then .cmux_checkpoint = $cmux_ckpt else . end | if $skip then .skip_permissions = true else . end | if $headless then .is_headless = true else . end | if $ct != "" then .custom_title = $ct else . end' \
                 > "${SESSION_FILE}.tmp" && mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
         fi
         ;;
@@ -823,6 +837,10 @@ case "$EVENT" in
                     'if .status == "dead" then . else .status = $status | .updated_at = $updated end'
             fi
         fi
+        # Capture latest custom title (auto-title is written by turn end, so Stop is reliable).
+        CT=$(latest_custom_title || true)
+        [ -n "$CT" ] && [ -f "$SESSION_FILE" ] && \
+            update_json_file "$SESSION_FILE" --arg ct "$CT" '.custom_title = $ct'
         # Skip notification for team agent sessions.
         # detect_parent_session_id is re-checked here as a fallback in case the process
         # tree wasn't fully established when it ran at script start.
@@ -901,6 +919,8 @@ case "$EVENT" in
                 --arg updated "$NOW" \
                 --arg prompt "$PROMPT" \
                 'if .status == "dead" then . else .status = "working" | .updated_at = $updated | if $prompt != "" then .last_prompt = $prompt else . end end'
+            CT=$(latest_custom_title || true)
+            [ -n "$CT" ] && update_json_file "$SESSION_FILE" --arg ct "$CT" '.custom_title = $ct'
         fi
         ;;
 

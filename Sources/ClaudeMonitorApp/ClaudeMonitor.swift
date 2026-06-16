@@ -980,7 +980,7 @@ class SessionReader: ObservableObject {
                         enriched.cwd = derived.cwd
                     }
                     enriched.agent_count = derived.agentCount
-                    enriched.custom_title = derived.customTitle
+                    if enriched.custom_title == nil { enriched.custom_title = derived.customTitle }
                 }
                 // Fallback: subagent sessions skip derivedData but their meta cache has customTitle
                 if enriched.custom_title == nil {
@@ -1076,7 +1076,7 @@ class SessionReader: ObservableObject {
                         session.cwd = derived.cwd
                     }
                     session.agent_count = derived.agentCount
-                    session.custom_title = derived.customTitle
+                    if session.custom_title == nil { session.custom_title = derived.customTitle }
                 }
                 // Fallback: subagent sessions skip derivedData but their meta cache has customTitle
                 if session.custom_title == nil {
