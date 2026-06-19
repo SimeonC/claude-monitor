@@ -1267,7 +1267,9 @@ class SessionReader: ObservableObject {
         let headlessLoaded    = loaded.filter { $0.is_headless == true }
 
         let sessionComparator: (SessionInfo, SessionInfo) -> Bool = { a, b in
-            let cmp = a.project.localizedCaseInsensitiveCompare(b.project)
+            let labelA = a.custom_title ?? a.project
+            let labelB = b.custom_title ?? b.project
+            let cmp = labelA.localizedCaseInsensitiveCompare(labelB)
             if cmp != .orderedSame { return cmp == .orderedAscending }
             let tid0 = a.terminal_session_id
             let tid1 = b.terminal_session_id
