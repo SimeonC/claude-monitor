@@ -205,4 +205,39 @@ final class SnapshotBuilderTests: XCTestCase {
         )
         XCTAssertEqual(h1, h2)
     }
+
+    // MARK: - Identity hash — childContextPcts
+
+    func test_computeIdentityHash_differentChildContextPcts_differentHash() {
+        let base = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            childContextPcts: []
+        )
+        let withPcts = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            childContextPcts: [63, 41]
+        )
+        XCTAssertNotEqual(base, withPcts)
+    }
+
+    func test_computeIdentityHash_sameChildContextPcts_stableHash() {
+        let h1 = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            childContextPcts: [63, 41, 17]
+        )
+        let h2 = computeIdentityHash(
+            status: "idle", displayName: "myproj",
+            updatedAt: "2024-01-01T12:00:00Z",
+            teamName: nil, isActive: false,
+            childContextPcts: [63, 41, 17]
+        )
+        XCTAssertEqual(h1, h2)
+    }
+
 }

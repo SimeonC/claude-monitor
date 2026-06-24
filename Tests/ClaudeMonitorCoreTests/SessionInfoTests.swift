@@ -304,4 +304,38 @@ final class SessionInfoTests: XCTestCase {
         s.permission_mode = nil
         XCTAssertNil(s.modeLabel)
     }
+
+    // MARK: - child_context_pcts
+
+    func testDecodeWithChildContextPcts() throws {
+        let json = """
+        {"session_id":"s7","status":"idle","project":"p","cwd":"/p",
+         "terminal":"","terminal_session_id":"","started_at":"","updated_at":"",
+         "last_prompt":"","agent_count":0,"child_context_pcts":[63,41,17]}
+        """
+        let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(session.child_context_pcts, [63, 41, 17])
+    }
+
+    func testDecodeWithoutChildContextPctsIsNil() throws {
+        let json = """
+        {"session_id":"s8","status":"idle","project":"p","cwd":"/p",
+         "terminal":"","terminal_session_id":"","started_at":"","updated_at":"",
+         "last_prompt":"","agent_count":0}
+        """
+        let session = try JSONDecoder().decode(SessionInfo.self, from: json.data(using: .utf8)!)
+        XCTAssertNil(session.child_context_pcts)
+    }
+
+    func testRoundTripChildContextPcts() throws {
+        let original = SessionInfo(
+            session_id: "rt2", status: "idle", project: "p", cwd: "/p",
+            terminal: "", terminal_session_id: "",
+            started_at: "", updated_at: "", last_prompt: "",
+            child_context_pcts: [80, 50, 20]
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(SessionInfo.self, from: data)
+        XCTAssertEqual(decoded.child_context_pcts, [80, 50, 20])
+    }
 }

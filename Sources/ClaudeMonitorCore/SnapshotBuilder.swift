@@ -42,7 +42,8 @@ func computeIdentityHash(
     isActive: Bool,
     permissionMode: String? = nil,
     customTitle: String? = nil,
-    isHeadless: Bool = false
+    isHeadless: Bool = false,
+    childContextPcts: [Int] = []
 ) -> UInt64 {
     var h = fnv1a(status)
     h = fnv1a(displayName, seed: h)
@@ -56,6 +57,7 @@ func computeIdentityHash(
     h = fnv1a(permissionMode ?? "\u{0}", seed: h)
     h = fnv1a(customTitle ?? "\u{0}", seed: h)
     h = fnv1a(isHeadless ? "h" : "\u{0}", seed: h)
+    h = fnv1a(childContextPcts.map(String.init).joined(separator: ","), seed: h)
     if isActive { h ^= 0xFFFF_FFFF_FFFF_FFFF }
     return h
 }
@@ -107,7 +109,8 @@ public func buildSnapshot(
             isActive: isActive,
             permissionMode: session.permission_mode,
             customTitle: session.custom_title,
-            isHeadless: session.is_headless == true
+            isHeadless: session.is_headless == true,
+            childContextPcts: session.child_context_pcts ?? []
         )
         rows.append(
             SessionRow(

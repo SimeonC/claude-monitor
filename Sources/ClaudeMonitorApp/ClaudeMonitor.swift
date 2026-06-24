@@ -1244,17 +1244,25 @@ class SessionReader: ObservableObject {
             }
         }
 
-        // Count linked child sessions per parent and add to agent_count
+        // Count linked child sessions per parent and add to agent_count; collect child context pcts
         if !childSessions.isEmpty {
             var childCount: [String: Int] = [:]
+            var childPcts: [String: [Int]] = [:]
             for child in childSessions {
                 guard let parentSid = child.parent_session_id else { continue }
                 childCount[parentSid, default: 0] += 1
+                if let pct = child.context_pct {
+                    childPcts[parentSid, default: []].append(pct)
+                }
             }
             for i in parentSessions.indices {
-                let linked = childCount[parentSessions[i].session_id] ?? 0
+                let sid = parentSessions[i].session_id
+                let linked = childCount[sid] ?? 0
                 if linked > 0 {
                     parentSessions[i].agent_count = max(parentSessions[i].agent_count, linked)
+                }
+                if let pcts = childPcts[sid], !pcts.isEmpty {
+                    parentSessions[i].child_context_pcts = pcts.sorted(by: >)
                 }
             }
         }
@@ -1758,6 +1766,22 @@ struct SessionRowView: View, Equatable {
                             .padding(.vertical, 2)
                             .background(Capsule().fill(contextPctColor(session.context_pct).opacity(0.15)))
                             .fixedSize()
+                    }
+
+                    if let childPcts = session.child_context_pcts, !childPcts.isEmpty {
+                        Text("·")
+                            .font(.system(size: 10.8, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.4))
+                            .fixedSize()
+                        ForEach(Array(childPcts.enumerated()), id: \.offset) { (_, pct) in
+                            Text("\(pct)%")
+                                .font(.system(size: 10.8, weight: .medium, design: .monospaced))
+                                .foregroundColor(contextPctColor(pct))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(contextPctColor(pct).opacity(0.15)))
+                                .fixedSize()
+                        }
                     }
                 }
 
