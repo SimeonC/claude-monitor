@@ -15,9 +15,10 @@ public struct StatusCounts {
         idle      = interactive.filter { $0.status == "idle" }.count
         headless  = sessions.filter { $0.is_headless == true }.count
         total     = sessions.count
-        workingContextPcts = interactive
-            .filter { $0.status == "working" }
-            .compactMap { $0.context_pct }
+        let workingSessions = interactive.filter { $0.status == "working" }
+        let ownPcts = workingSessions.compactMap { $0.context_pct }
+        let childPcts = workingSessions.flatMap { $0.child_context_pcts ?? [] }
+        workingContextPcts = (ownPcts + childPcts)
             .filter { $0 >= StatusCounts.contextAttentionThreshold }
             .sorted(by: >)
     }

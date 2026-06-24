@@ -168,4 +168,30 @@ final class StatusCountsTests: XCTestCase {
         let sessions = [makeSession(status: "working", contextPct: 50)]
         XCTAssertEqual(StatusCounts(sessions).workingContextPcts, [50])
     }
+
+    // MARK: - workingContextPcts — child_context_pcts roll-up
+
+    func testWorkingContextPctsIncludesChildPctsAboveThreshold() {
+        var session = makeSession(status: "working", contextPct: nil)
+        session.child_context_pcts = [80, 30]
+        XCTAssertEqual(StatusCounts([session]).workingContextPcts, [80])
+    }
+
+    func testWorkingContextPctsChildAndOwnPctCombined() {
+        var session = makeSession(status: "working", contextPct: 60)
+        session.child_context_pcts = [75, 20]
+        XCTAssertEqual(StatusCounts([session]).workingContextPcts, [75, 60])
+    }
+
+    func testWorkingContextPctsChildPctsExcludedWhenNotWorking() {
+        var session = makeSession(status: "idle", contextPct: nil)
+        session.child_context_pcts = [90]
+        XCTAssertEqual(StatusCounts([session]).workingContextPcts, [])
+    }
+
+    func testWorkingContextPctsChildPctsExcludedForHeadless() {
+        var session = makeHeadlessSession(status: "working", contextPct: nil)
+        session.child_context_pcts = [80]
+        XCTAssertEqual(StatusCounts([session]).workingContextPcts, [])
+    }
 }
