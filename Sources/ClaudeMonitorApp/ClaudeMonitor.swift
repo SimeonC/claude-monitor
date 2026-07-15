@@ -1607,21 +1607,12 @@ struct SessionRowView: View, Equatable {
     private var session: SessionInfo { row.session }
     private var isDanger: Bool { session.skip_permissions == true }
     private var isHeadless: Bool { session.is_headless == true }
-    private var hasTeam: Bool { row.team != nil }
     private var canFocusRow: Bool { canFocus(session) }
 
-    private var badgeCount: Int {
-        let teamCount = row.team?.activeAgentCount ?? 0
-        // Subagents only run during a turn — if session is idle, agent_count is stale
-        let agentCount = session.status == "working" ? session.agent_count : 0
-        return max(teamCount, agentCount)
-    }
-
-    // A team/agents session shows a simple person glyph (no count); otherwise the mode
-    // icon. Single compact swatch either way — keeps the leading column narrow.
+    // Always show the mode icon (planning/running/etc.) — we don't reflect how many
+    // agents/team members are involved. Single compact swatch keeps the column narrow.
     private var iconSymbol: String {
-        if hasTeam || badgeCount > 0 { return hasTeam ? "person.3.fill" : "person.2.fill" }
-        return session.modeIcon
+        session.modeIcon
     }
 
     @ViewBuilder
